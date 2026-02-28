@@ -1,0 +1,69 @@
+{
+  "manifest_version": "0.3",
+  "name": "boondmanager-mcp-server",
+  "display_name": "BoondManager MCP Server",
+  "version": "1.2.0",
+  "description": "MCP Server for BoondManager API - 158 tools across 36 domains for ERP/CRM data",
+  "author": {
+    "name": "Silamir",
+    "url": "https://github.com/fauguste/boondmanager-mcp-server"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fauguste/boondmanager-mcp-server.git"
+  },
+  "homepage": "https://github.com/fauguste/boondmanager-mcp-server#readme",
+  "support": "https://github.com/fauguste/boondmanager-mcp-server/issues",
+  "license": "MIT",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "BOOND_BASE_URL": "${user_config.base_url}",
+        "BOOND_USER": "${user_config.user}",
+        "BOOND_PASSWORD": "${user_config.password}",
+        "BOOND_API_TOKEN": "${user_config.api_token}"
+      }
+    }
+  },
+  "user_config": {
+    "base_url": {
+      "type": "string",
+      "title": "BoondManager URL",
+      "description": "URL de base de l'API BoondManager (ex: https://ui.boondmanager.com/api)",
+      "default": "https://ui.boondmanager.com/api",
+      "required": false
+    },
+    "user": {
+      "type": "string",
+      "title": "Utilisateur",
+      "description": "Nom d'utilisateur pour l'authentification BasicAuth",
+      "required": false
+    },
+    "password": {
+      "type": "string",
+      "title": "Mot de passe",
+      "description": "Mot de passe pour l'authentification BasicAuth",
+      "sensitive": true,
+      "required": false
+    },
+    "api_token": {
+      "type": "string",
+      "title": "Token API",
+      "description": "Token JWT pour l'authentification Bearer (alternative à user/password)",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "tools_generated": true,
+  "keywords": ["boondmanager", "esn", "crm", "erp", "candidates", "resources", "mcp"],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  }
+}
