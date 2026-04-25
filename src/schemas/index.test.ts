@@ -51,11 +51,11 @@ describe("SearchSchema", () => {
   it("should apply defaults for page and pageSize", () => {
     const result = SearchSchema.parse({});
     expect(result.page).toBe(1);
-    expect(result.pageSize).toBe(20);
+    expect(result.pageSize).toBe(30);
   });
 
   it("should reject pageSize over max", () => {
-    const result = SearchSchema.safeParse({ pageSize: 200 });
+    const result = SearchSchema.safeParse({ pageSize: 600 });
     expect(result.success).toBe(false);
   });
 
@@ -300,7 +300,7 @@ describe("TimesheetSearchSchema", () => {
   it("should accept empty search with defaults", () => {
     const result = TimesheetSearchSchema.parse({});
     expect(result.page).toBe(1);
-    expect(result.pageSize).toBe(20);
+    expect(result.pageSize).toBe(30);
   });
 
   it("should accept date range", () => {

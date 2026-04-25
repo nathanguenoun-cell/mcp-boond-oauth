@@ -10,31 +10,104 @@ export const SearchSchema = z.object({
 }).strict();
 
 // ---- Reusable filter field helpers ----
-// Keep descriptions short here; the tool description guides the LLM on usage.
+// IMPORTANT: input field names below MUST match the BoondManager API query parameter names
+// exactly (e.g., perimeterManagers, resourceStates, opportunityStates). buildSearchQuery
+// passes them through as `key[]=value` for arrays. See https://doc.boondmanager.com/api-externe/
 const pageField = z.number().int().min(1).default(1).describe("Numéro de page (défaut: 1)");
 const pageSizeField = z.number().int().min(1).max(MAX_PAGE_SIZE).default(DEFAULT_PAGE_SIZE)
   .describe(`Nombre de résultats par page (max: ${MAX_PAGE_SIZE}, défaut: ${DEFAULT_PAGE_SIZE})`);
-const sortField = z.string().optional().describe("Champ de tri (ex: lastName, createdAt)");
-const orderField = z.enum(["asc", "desc"]).optional().describe("Ordre de tri : 'asc' ou 'desc'");
-const idArray = (doc: string) => z.array(z.string()).optional().describe(doc);
+const sortField = z.string().optional().describe("Champ de tri (ex: lastName, firstName, updateDate)");
+const orderField = z.enum(["asc", "desc"]).optional().describe("Ordre de tri (asc/desc)");
 const intArray = (doc: string) => z.array(z.number().int()).optional().describe(doc);
 const strArray = (doc: string) => z.array(z.string()).optional().describe(doc);
 
-// ---- Resource search schema ----
-// Filtres les plus utiles de /resources. Inclut mainManagers (clé pour hiérarchie N-1/N-2).
+// Shared "perimeter" filters available on every entity search (from RAML trait `searchable`).
+// These are the CORRECT filters for "my team / my agency / my N-1" — NOT the old `mainManagers`.
+const perimeterManagersField = intArray(
+  "IDs des managers (ressources). Conserve les entités dont le responsable est l'un de ces managers. "
+  + "Pour 'mon équipe / N-1 d'une personne X', passer [X_id]. Obtenir son propre ID via boond_application_current_user."
+);
+const perimeterAgenciesField = intArray("IDs d'agences. Conserve les entités dont le responsable appartient à ces agences.");
+const perimeterPolesField = intArray("IDs de pôles. Conserve les entités dont le responsable appartient à ces pôles.");
+const perimeterBusinessUnitsField = intArray("IDs de business units. Conserve les entités dont le responsable appartient à ces BU.");
+const perimeterDynamicField = z.array(
+  z.enum(["data", "agencies", "poles", "businessUnits", "managers"])
+).optional().describe(
+  "Périmètre dynamique relatif à l'utilisateur courant (raccourci sans avoir à connaître son propre ID). "
+  + "Valeurs : 'data' (mes propres données), 'managers' (mon équipe / mes N-1), 'agencies' (mes agences), "
+  + "'poles' (mes pôles), 'businessUnits' (mes BU). Combinable."
+);
+const narrowPerimeterField = z.boolean().optional().describe(
+  "Si true, jointure ET entre les filtres `perimeter*` (au lieu de OU par défaut)."
+);
+const startDateField = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
+  .describe("Date de début (YYYY-MM-DD), à utiliser avec `period`.");
+const endDateField = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
+  .describe("Date de fin (YYYY-MM-DD), à utiliser avec `period`.");
+
+// ---- Resource search schema (collaborateurs internes) ----
+// Source: https://doc.boondmanager.com/api-externe/raml-build/resources/resources/search.raml
 export const ResourceSearchSchema = z.object({
-  keywords: z.string().optional().describe("Mots-clés (nom, prénom, email, compétences libres)"),
-  mainManagers: idArray("ID(s) du/des managers principaux. Les ressources retournées ont ce(s) manager(s) comme N+1. CLÉ pour les requêtes hiérarchiques (mes N-1, N-2...)."),
-  states: intArray("États de ressource à inclure (voir dictionnaire 'states/resources')"),
-  agencies: idArray("IDs d'agences"),
-  poles: idArray("IDs de pôles"),
-  businessUnits: idArray("IDs de business units"),
-  skills: strArray("Compétences techniques (ex: ['Java', 'React'])"),
-  tools: strArray("Outils / technologies"),
-  activityAreas: strArray("Secteurs d'activité"),
-  languages: strArray("Langues"),
-  typeOf: strArray("Types de ressource (interne, sous-traitant...)"),
-  saved: z.string().optional().describe("ID d'une recherche enregistrée (remplace les autres filtres)"),
+  keywords: z.string().optional().describe(
+    "Mots-clés (par défaut, recherche dans CV + dossier technique). Pour cibler un champ précis, "
+    + "fournir aussi `keywordsType` (ex: lastName, firstName, fullName, emails, title, titleSkills, phones, reference)."
+  ),
+  keywordsType: z.enum([
+    "resumeTd", "lastName", "firstName", "fullName", "strictFullName",
+    "emails", "title", "titleSkills", "phones", "reference", "resume", "td",
+  ]).optional().describe(
+    "Champ ciblé par `keywords`. Défaut: 'resumeTd' (CV + dossier technique). "
+    + "Pour 'fullName' utiliser `keywords = 'NOM#PRENOM'`."
+  ),
+  perimeterManagers: perimeterManagersField,
+  perimeterAgencies: perimeterAgenciesField,
+  perimeterPoles: perimeterPolesField,
+  perimeterBusinessUnits: perimeterBusinessUnitsField,
+  perimeterDynamic: perimeterDynamicField,
+  narrowPerimeter: narrowPerimeterField,
+  resourceStates: intArray(
+    "IDs d'états de ressource (dictionnaire setting.state.resource via boond_application_dictionary)."
+  ),
+  excludeResourceStates: intArray("IDs d'états de ressource à EXCLURE."),
+  resourceTypes: intArray(
+    "IDs de types de ressource (dictionnaire setting.typeOf.resource)."
+  ),
+  excludeResourceTypes: intArray("IDs de types de ressource à EXCLURE."),
+  activityAreas: strArray("IDs de secteurs d'activité (dictionnaire setting.activityArea)."),
+  expertiseAreas: strArray("IDs de domaines d'expertise (dictionnaire setting.expertiseArea)."),
+  tools: strArray(
+    "IDs d'outils/technos (dictionnaire setting.tool). Logique OU par défaut. "
+    + "Pour ET, ajouter '#AND#' en 1er élément: tools=['#AND#','12','34']."
+  ),
+  experiences: intArray("IDs de niveaux d'expérience (dictionnaire setting.experience)."),
+  trainings: strArray("IDs de formations (dictionnaire setting.training)."),
+  mobilityAreas: strArray("IDs de zones de mobilité (dictionnaire setting.mobilityArea)."),
+  languages: strArray(
+    "Langues parlées au format `langueId|niveauId` (dictionnaires setting.languageSpoken et setting.languageLevel). Ex: ['anglais|courant']."
+  ),
+  flags: intArray("IDs de tags (drapeaux) attachés à la ressource."),
+  period: z.string().optional().describe(
+    "Champ temporel pour filtrer par période. Valeurs courantes: 'available' (disponibilité), "
+    + "'working' (en mission hors interne), 'workingAll', 'absent', 'idle', 'hired', 'left', "
+    + "'employed', 'unemployed', 'updated', 'arrival', 'birthday', 'seniority', 'present', "
+    + "'noAction'/'withActions'/'withoutActions'/'withAbsences'/'withoutAbsences'. "
+    + "À combiner avec `startDate` + `endDate`."
+  ),
+  startDate: startDateField,
+  endDate: endDateField,
+  providerCompanies: intArray("IDs de sociétés sous-traitantes (filtre pour ressources externes)."),
+  coordinates: z.string().optional().describe(
+    "Coordonnées GPS 'latitude,longitude' pour recherche géographique. À combiner avec `geoDistance`."
+  ),
+  location: z.string().optional().describe(
+    "Adresse texte (ville, etc.) pour recherche géographique. À combiner avec `geoDistance`."
+  ),
+  geoDistance: z.number().int().min(5).max(200).optional().describe(
+    "Rayon en km pour la recherche géographique (5-200). Requis si `coordinates` ou `location` est fourni."
+  ),
+  excludeManager: z.boolean().optional().describe("Si true, ne retourne que les ressources sans compte manager."),
+  shields: z.array(z.enum(["uncomplete", "minimum", "complete"])).optional()
+    .describe("Niveau de complétude des champs conditionnels."),
   sort: sortField,
   order: orderField,
   page: pageField,
@@ -42,22 +115,54 @@ export const ResourceSearchSchema = z.object({
 }).strict();
 
 // ---- Candidate search schema ----
+// Source: https://doc.boondmanager.com/api-externe/raml-build/resources/candidates/search.raml
 export const CandidateSearchSchema = z.object({
-  keywords: z.string().optional().describe("Mots-clés (nom, prénom, email, compétences libres)"),
-  mainManagers: idArray("ID(s) du/des managers principaux (responsables des candidats)"),
-  states: intArray("États de candidat (voir dictionnaire 'states/candidates')"),
-  agencies: idArray("IDs d'agences"),
-  poles: idArray("IDs de pôles"),
-  businessUnits: idArray("IDs de business units"),
-  skills: strArray("Compétences techniques"),
-  tools: strArray("Outils / technologies"),
-  activityAreas: strArray("Secteurs d'activité"),
-  languages: strArray("Langues"),
-  qualifications: strArray("Qualifications / diplômes"),
-  mobilityAreas: strArray("Zones de mobilité"),
-  typeOf: strArray("Types de candidat"),
-  origins: idArray("IDs d'origines (source de recrutement)"),
-  saved: z.string().optional().describe("ID d'une recherche enregistrée"),
+  keywords: z.string().optional().describe(
+    "Mots-clés (par défaut, recherche dans CV + dossier technique). Combinable avec `keywordsType`."
+  ),
+  keywordsType: z.enum([
+    "resumeTd", "lastName", "firstName", "fullName", "strictFullName",
+    "emails", "title", "titleSkills", "phones", "reference", "resume", "td",
+  ]).optional().describe("Champ ciblé par `keywords` (défaut: 'resumeTd')."),
+  perimeterManagers: perimeterManagersField,
+  perimeterAgencies: perimeterAgenciesField,
+  perimeterPoles: perimeterPolesField,
+  perimeterBusinessUnits: perimeterBusinessUnitsField,
+  perimeterDynamic: perimeterDynamicField,
+  perimeterManagersType: z.enum(["main", "hr"]).optional().describe(
+    "Type de responsable visé par `perimeterManagers`: 'main' (Main Manager) ou 'hr' (HR Manager)."
+  ),
+  narrowPerimeter: narrowPerimeterField,
+  candidateStates: intArray(
+    "IDs d'états de candidat (dictionnaire setting.state.candidate via boond_application_dictionary)."
+  ),
+  candidateTypes: intArray("IDs de types de candidat (dictionnaire setting.typeOf.resource)."),
+  contractTypes: intArray("IDs de types de contrat recherchés (dictionnaire setting.typeOf.contract)."),
+  availabilityTypes: intArray("IDs de types de disponibilité (dictionnaire setting.availability)."),
+  activityAreas: strArray("IDs de secteurs d'activité (dictionnaire setting.activityArea)."),
+  expertiseAreas: strArray("IDs de domaines d'expertise."),
+  tools: strArray(
+    "IDs d'outils/technos. Logique OU par défaut. Pour ET, ajouter '#AND#' en 1er élément."
+  ),
+  experiences: intArray("IDs de niveaux d'expérience."),
+  trainings: strArray("IDs de formations."),
+  mobilityAreas: strArray("IDs de zones de mobilité."),
+  languages: strArray("Langues au format `langueId|niveauId` (ex: ['anglais|courant'])."),
+  evaluations: strArray("IDs d'évaluations."),
+  sources: strArray("IDs de sources de recrutement (dictionnaire setting.source)."),
+  flags: intArray("IDs de tags."),
+  period: z.string().optional().describe(
+    "Filtre temporel : 'created', 'updated', 'available', "
+    + "'noAction'/'withActions'/'withoutActions'. À combiner avec `startDate` + `endDate`."
+  ),
+  startDate: startDateField,
+  endDate: endDateField,
+  providerCompanies: intArray("IDs de sociétés sous-traitantes."),
+  coordinates: z.string().optional().describe("Coordonnées GPS 'lat,lon'. Requiert `geoDistance`."),
+  location: z.string().optional().describe("Adresse texte. Requiert `geoDistance`."),
+  geoDistance: z.number().int().min(5).max(200).optional().describe("Rayon km (5-200)."),
+  shields: z.array(z.enum(["uncomplete", "minimum", "complete"])).optional()
+    .describe("Niveau de complétude."),
   sort: sortField,
   order: orderField,
   page: pageField,
@@ -65,18 +170,49 @@ export const CandidateSearchSchema = z.object({
 }).strict();
 
 // ---- Contact search schema ----
+// Source: https://doc.boondmanager.com/api-externe/raml-build/resources/contacts/search.raml
 export const ContactSearchSchema = z.object({
-  keywords: z.string().optional().describe("Mots-clés (nom, email, société...)"),
-  mainManagers: idArray("ID(s) du/des managers principaux (responsables commerciaux des contacts)"),
-  states: intArray("États de contact"),
-  agencies: idArray("IDs d'agences"),
-  poles: idArray("IDs de pôles"),
-  businessUnits: idArray("IDs de business units"),
-  company: z.string().optional().describe("ID d'une société : filtre les contacts rattachés à cette société"),
-  typeOf: strArray("Types de contact"),
-  origins: idArray("IDs d'origines"),
-  activityAreas: strArray("Secteurs d'activité"),
-  saved: z.string().optional().describe("ID d'une recherche enregistrée"),
+  keywords: z.string().optional().describe(
+    "Mots-clés (défaut: nom + prénom + société + fonction + périmètre technique). "
+    + "Combinable avec `keywordsType`."
+  ),
+  keywordsType: z.enum([
+    "default", "lastName", "firstName", "fullName", "strictFullName",
+    "companyFullName", "emails", "phones", "socialNetworks",
+  ]).optional().describe(
+    "Champ ciblé. Défaut: 'default'. Pour 'fullName' utiliser `keywords = 'NOM#PRENOM'`. "
+    + "Pour 'companyFullName' utiliser `keywords = 'CSOCid#NOM#PRENOM'`."
+  ),
+  perimeterManagers: perimeterManagersField,
+  perimeterAgencies: perimeterAgenciesField,
+  perimeterPoles: perimeterPolesField,
+  perimeterBusinessUnits: perimeterBusinessUnitsField,
+  perimeterDynamic: perimeterDynamicField,
+  narrowPerimeter: narrowPerimeterField,
+  states: intArray("IDs d'états de contact (dictionnaire setting.state.contact)."),
+  companyStates: intArray("IDs d'états des sociétés rattachées (dictionnaire setting.state.company)."),
+  typesOf: intArray(
+    "IDs de types de contact (dictionnaire setting.typeOf.contact). "
+    + "⚠️ Le paramètre s'appelle `typesOf` (avec un 's'), PAS `typeOf`."
+  ),
+  origins: strArray("IDs d'origines (dictionnaire setting.origin)."),
+  activityAreas: strArray("IDs de secteurs d'activité de la société."),
+  expertiseAreas: strArray("IDs de domaines d'expertise de la société."),
+  tools: strArray("IDs d'outils. Logique OU par défaut, '#AND#' en 1er pour ET."),
+  influencers: intArray("IDs de contacts influenceurs."),
+  flags: intArray("IDs de tags."),
+  period: z.string().optional().describe(
+    "Filtre temporel : 'created', 'updated', 'noAction'/'withActions'/'withoutActions'. "
+    + "À combiner avec `startDate` + `endDate`."
+  ),
+  startDate: startDateField,
+  endDate: endDateField,
+  completeness: strArray(
+    "Filtre par complétude des champs au format `fieldId:mode` (fieldId: email/phone/socialNetworks ; "
+    + "mode: empty/filled). Logique OU par défaut, '#AND#' en 1er pour ET. Ex: ['email:empty','phone:empty']."
+  ),
+  shields: z.array(z.enum(["uncomplete", "minimum", "complete"])).optional()
+    .describe("Niveau de complétude."),
   sort: sortField,
   order: orderField,
   page: pageField,
@@ -84,17 +220,32 @@ export const ContactSearchSchema = z.object({
 }).strict();
 
 // ---- Company search schema ----
+// Source: https://doc.boondmanager.com/api-externe/raml-build/resources/companies/search.raml
 export const CompanySearchSchema = z.object({
-  keywords: z.string().optional().describe("Mots-clés (nom, SIRET, email...)"),
-  mainManagers: idArray("ID(s) du/des managers principaux (responsables commerciaux)"),
-  states: intArray("États de société"),
-  agencies: idArray("IDs d'agences"),
-  poles: idArray("IDs de pôles"),
-  businessUnits: idArray("IDs de business units"),
-  typeOf: strArray("Types de société (client, prospect, fournisseur...)"),
-  activityAreas: strArray("Secteurs d'activité"),
-  origins: idArray("IDs d'origines"),
-  saved: z.string().optional().describe("ID d'une recherche enregistrée"),
+  keywords: z.string().optional().describe(
+    "Mots-clés (défaut: nom + ville + pays + expertise + informations). Combinable avec `keywordsType`."
+  ),
+  keywordsType: z.enum(["default", "name", "phones", "emails", "socialNetworks"]).optional()
+    .describe("Champ ciblé par `keywords`. Défaut: 'default'."),
+  perimeterManagers: perimeterManagersField,
+  perimeterAgencies: perimeterAgenciesField,
+  perimeterPoles: perimeterPolesField,
+  perimeterBusinessUnits: perimeterBusinessUnitsField,
+  perimeterDynamic: perimeterDynamicField,
+  narrowPerimeter: narrowPerimeterField,
+  states: intArray("IDs d'états de société (dictionnaire setting.state.company)."),
+  expertiseAreas: strArray("IDs de domaines d'expertise (dictionnaire setting.expertiseArea)."),
+  origins: strArray("IDs d'origines (dictionnaire setting.origin)."),
+  influencers: intArray("IDs d'influenceurs."),
+  flags: intArray("IDs de tags."),
+  period: z.string().optional().describe(
+    "Filtre temporel : 'created', 'updated', 'noAction'/'withActions'/'withoutActions'. "
+    + "À combiner avec `startDate` + `endDate`."
+  ),
+  startDate: startDateField,
+  endDate: endDateField,
+  shields: z.array(z.enum(["uncomplete", "minimum", "complete"])).optional()
+    .describe("Niveau de complétude."),
   sort: sortField,
   order: orderField,
   page: pageField,
@@ -102,22 +253,44 @@ export const CompanySearchSchema = z.object({
 }).strict();
 
 // ---- Opportunity search schema ----
+// Source: https://doc.boondmanager.com/api-externe/raml-build/resources/opportunities/search.raml
 export const OpportunitySearchSchema = z.object({
-  keywords: z.string().optional().describe("Mots-clés (titre, société, contact...)"),
-  mainManagers: idArray("ID(s) du/des managers principaux (commerciaux en charge)"),
-  states: intArray("États d'opportunité (voir dictionnaire 'states/opportunities')"),
-  agencies: idArray("IDs d'agences"),
-  poles: idArray("IDs de pôles"),
-  businessUnits: idArray("IDs de business units"),
-  company: z.string().optional().describe("ID d'une société cliente"),
-  contact: z.string().optional().describe("ID d'un contact"),
-  activityAreas: strArray("Secteurs d'activité"),
-  origins: idArray("IDs d'origines"),
-  period: z.enum(["creation", "update", "startDate", "endDate"]).optional()
-    .describe("Champ date sur lequel appliquer startDate/endDate"),
-  startDate: z.string().optional().describe("Début de période (YYYY-MM-DD), à utiliser avec `period`"),
-  endDate: z.string().optional().describe("Fin de période (YYYY-MM-DD), à utiliser avec `period`"),
-  saved: z.string().optional().describe("ID d'une recherche enregistrée"),
+  keywords: z.string().optional().describe(
+    "Mots-clés. Pour cibler par ID préfixé : 'AOnnn' (opportunité), 'CSOCnnn' (société), "
+    + "'CCONnnn' (contact), 'CANDnnn' (candidat), 'COMPnnn' (ressource), 'PRODnnn' (produit). "
+    + "Sinon recherche plein texte sur titre/société."
+  ),
+  perimeterManagers: perimeterManagersField,
+  perimeterAgencies: perimeterAgenciesField,
+  perimeterPoles: perimeterPolesField,
+  perimeterBusinessUnits: perimeterBusinessUnitsField,
+  perimeterDynamic: perimeterDynamicField,
+  perimeterManagersType: z.enum(["main", "hr"]).optional()
+    .describe("Type de responsable visé par `perimeterManagers` (main/hr)."),
+  narrowPerimeter: narrowPerimeterField,
+  opportunityStates: intArray(
+    "IDs d'états d'opportunité (dictionnaire setting.state.opportunity)."
+  ),
+  opportunityTypes: strArray("IDs de types d'opportunité (dictionnaire setting.typeOf.project)."),
+  positioningStates: strArray(
+    "IDs d'états de positionnement, ou 'none' pour les opportunités sans positionnement."
+  ),
+  expertiseAreas: strArray("IDs de domaines d'expertise."),
+  activityAreas: strArray("IDs de secteurs d'activité."),
+  tools: strArray("IDs d'outils."),
+  places: strArray("IDs de zones (dictionnaire setting.mobilityArea)."),
+  durations: intArray("IDs de durées (dictionnaire setting.duration)."),
+  origins: strArray("IDs d'origines."),
+  flags: intArray("IDs de tags."),
+  period: z.string().optional().describe(
+    "Filtre temporel : 'created' (création), 'started', 'closingDate' (date de closing), "
+    + "'updated', 'updatedPositioning', 'noAction'/'withActions'/'withoutActions'. "
+    + "À combiner avec `startDate` + `endDate`."
+  ),
+  startDate: startDateField,
+  endDate: endDateField,
+  shields: z.array(z.enum(["uncomplete", "minimum", "complete"])).optional()
+    .describe("Niveau de complétude."),
   sort: sortField,
   order: orderField,
   page: pageField,
@@ -125,22 +298,30 @@ export const OpportunitySearchSchema = z.object({
 }).strict();
 
 // ---- Project search schema ----
+// Source: https://doc.boondmanager.com/api-externe/raml-build/resources/projects/search.raml
 export const ProjectSearchSchema = z.object({
-  keywords: z.string().optional().describe("Mots-clés (nom du projet, société, contact...)"),
-  mainManagers: idArray("ID(s) du/des managers principaux (responsables du projet)"),
-  states: intArray("États de projet (voir dictionnaire 'states/projects')"),
-  agencies: idArray("IDs d'agences"),
-  poles: idArray("IDs de pôles"),
-  businessUnits: idArray("IDs de business units"),
-  company: z.string().optional().describe("ID d'une société cliente"),
-  contact: z.string().optional().describe("ID d'un contact"),
-  typeOf: strArray("Types de projet (régie, forfait, produit...)"),
-  activityAreas: strArray("Secteurs d'activité"),
-  period: z.enum(["creation", "update", "startDate", "endDate"]).optional()
-    .describe("Champ date sur lequel appliquer startDate/endDate"),
-  startDate: z.string().optional().describe("Début de période (YYYY-MM-DD)"),
-  endDate: z.string().optional().describe("Fin de période (YYYY-MM-DD)"),
-  saved: z.string().optional().describe("ID d'une recherche enregistrée"),
+  keywords: z.string().optional().describe(
+    "Mots-clés. Pour cibler par ID préfixé : 'PRJnnn' (projet), 'CSOCnnn' (société), "
+    + "'CCONnnn' (contact), 'AOnnn' (opportunité), 'COMPnnn' (ressource), 'CTRnnn' (contrat)."
+  ),
+  perimeterManagers: perimeterManagersField,
+  perimeterAgencies: perimeterAgenciesField,
+  perimeterPoles: perimeterPolesField,
+  perimeterBusinessUnits: perimeterBusinessUnitsField,
+  perimeterDynamic: perimeterDynamicField,
+  narrowPerimeter: narrowPerimeterField,
+  projectStates: intArray("IDs d'états de projet (dictionnaire setting.state.project)."),
+  projectTypes: intArray("IDs de types de projet (dictionnaire setting.typeOf.project)."),
+  companies: intArray("IDs de sociétés clientes : projets rattachés à ces sociétés."),
+  expertiseAreas: strArray("IDs de domaines d'expertise."),
+  activityAreas: strArray("IDs de secteurs d'activité."),
+  flags: intArray("IDs de tags."),
+  period: z.string().optional().describe(
+    "Filtre temporel : 'running' (en cours), 'created', 'started', 'stopped', 'closed', 'updated', "
+    + "'hasAdditionalDataOrPurchase'. À combiner avec `startDate` + `endDate`."
+  ),
+  startDate: startDateField,
+  endDate: endDateField,
   sort: sortField,
   order: orderField,
   page: pageField,

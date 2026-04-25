@@ -101,18 +101,21 @@ Returns: Liste des factures du contact.`,
   },
 ];
 
-const CONTACT_SEARCH_DESCRIPTION = `Recherche des contacts (interlocuteurs clients / prospects) dans BoondManager avec filtres avancés.
+const CONTACT_SEARCH_DESCRIPTION = `Recherche des contacts (interlocuteurs clients / prospects) dans BoondManager avec filtres serveur.
 
-⚠️ Privilégier les filtres structurés plutôt que de paginer toute la base.
+⚠️ Utilisez les filtres structurés plutôt que la pagination intégrale. Les noms de paramètres sont ceux exacts de l'API.
 
-Filtres utiles :
-• \`mainManagers\` : ID(s) des commerciaux responsables (utile pour "mes contacts" → passer votre userId via \`boond_application_current_user\`).
-• \`company\` : tous les contacts d'une société donnée (ID unique).
-• \`states\` : états de contact.
-• \`typeOf\` : types de contact.
-• \`origins\` : sources / origines.
-• \`agencies\`, \`poles\`, \`businessUnits\` : périmètre organisationnel.
-• \`keywords\` : recherche plein texte, en complément.
+Cas d'usage courants :
+• **Mes contacts** sans connaître son propre ID : \`perimeterDynamic: ["data"]\`. Pour "contacts gérés par X" : \`perimeterManagers: [<X_id>]\`.
+• **Contacts d'une société donnée** : utiliser \`keywords: "CSOC<companyId>"\` (préfixe CSOC + ID). Exemple : \`keywords: "CSOC6420"\` pour la société 6420.
+• **États / types** : \`states: [<id>]\` (dictionnaire \`setting.state.contact\`), \`typesOf: [<id>]\` (⚠️ avec un 's' final, dictionnaire \`setting.typeOf.contact\`), \`companyStates\` (états des sociétés rattachées). IDs entiers.
+• **Périmètre orga** : \`perimeterAgencies\`, \`perimeterPoles\`, \`perimeterBusinessUnits\`. \`narrowPerimeter: true\` pour ET.
+• **Profil métier** : \`activityAreas\`, \`expertiseAreas\`, \`tools\`, \`origins\` (sources), \`influencers\`.
+• **Période** : \`period: "created"|"updated"|"withActions"|"withoutActions"|"noAction"\` + \`startDate\`/\`endDate\`.
+• **Complétude** : \`completeness: ["email:empty","phone:empty"]\` (OU par défaut, '#AND#' en 1er pour ET) — utile pour "contacts sans email".
+• **Recherche par nom** : \`keywords: "Dupont"\` + \`keywordsType: "lastName"\` (ou firstName, fullName \`"NOM#PRENOM"\`, companyFullName \`"CSOCid#NOM#PRENOM"\`, emails, phones, socialNetworks).
+
+Pagination : \`page\`, \`pageSize\` (max 500). Tri : \`sort\` + \`order\`.
 
 Returns : liste paginée des contacts. Utiliser \`boond_contacts_get\` ou les outils d'onglets pour le détail.`;
 

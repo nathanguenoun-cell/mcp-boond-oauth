@@ -60,9 +60,28 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Extract release notes from CHANGELOG
+        id: changelog
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          # Extract the section between "## [<version>]" and the next "## [" header.
+          # We use index() rather than regex to avoid escaping the [] of the section header.
+          awk -v needle="## [${TAG_VERSION}]" '
+            index($0, needle) == 1 { capture = 1; next }
+            capture && index($0, "## [") == 1 { exit }
+            capture { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "WARNING: no CHANGELOG section found for $TAG_VERSION — release will use auto-generated notes only"
+          else
+            echo "Release notes for v$TAG_VERSION:"
+            cat RELEASE_NOTES.md
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
           files: "*.mcpb"
 

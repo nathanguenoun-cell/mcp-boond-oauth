@@ -1,8 +1,8 @@
 // BoondManager API constants
 export const DEFAULT_BASE_URL = "https://ui.boondmanager.com/api";
 export const CHARACTER_LIMIT = 50000;
-export const DEFAULT_PAGE_SIZE = 20;
-export const MAX_PAGE_SIZE = 100;
+export const DEFAULT_PAGE_SIZE = 30;
+export const MAX_PAGE_SIZE = 500;
 
 // API paths
 export const API_PATHS = {

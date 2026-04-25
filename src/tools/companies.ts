@@ -134,18 +134,21 @@ Returns: Liste des factures fournisseur de la société.`,
   },
 ];
 
-const COMPANY_SEARCH_DESCRIPTION = `Recherche des sociétés (clients, prospects, fournisseurs...) dans BoondManager avec filtres avancés.
+const COMPANY_SEARCH_DESCRIPTION = `Recherche des sociétés (clients, prospects, fournisseurs…) dans BoondManager avec filtres serveur.
 
-⚠️ Privilégier les filtres structurés plutôt que de paginer toute la base.
+⚠️ Utilisez les filtres structurés plutôt que la pagination intégrale. Les noms de paramètres sont ceux exacts de l'API.
 
-Filtres utiles :
-• \`mainManagers\` : ID(s) des commerciaux responsables (utile pour "mes comptes" → passer votre userId via \`boond_application_current_user\`).
-• \`states\` : états de société.
-• \`typeOf\` : types de société (client, prospect, fournisseur...).
-• \`activityAreas\` : secteurs d'activité.
-• \`origins\` : sources / origines.
-• \`agencies\`, \`poles\`, \`businessUnits\` : périmètre organisationnel.
-• \`keywords\` : recherche plein texte (nom, SIRET, email), en complément.
+Cas d'usage courants :
+• **Mes comptes** sans connaître son propre ID : \`perimeterDynamic: ["data"]\`. Pour "comptes gérés par X" : \`perimeterManagers: [<X_id>]\`.
+• **États** : \`states: [<id>]\` (dictionnaire \`setting.state.company\`). IDs entiers.
+• **Périmètre orga** : \`perimeterAgencies\`, \`perimeterPoles\`, \`perimeterBusinessUnits\`. \`narrowPerimeter: true\` pour ET.
+• **Segmentation métier** : \`expertiseAreas\` (dictionnaire \`setting.expertiseArea\`), \`origins\`, \`influencers\`.
+• **Période** : \`period: "created"|"updated"|"withActions"|"withoutActions"|"noAction"\` + \`startDate\`/\`endDate\`.
+• **Recherche** : \`keywords\` + \`keywordsType\` ('default' = nom/ville/pays/expertise/info, ou 'name', 'phones', 'emails', 'socialNetworks'). Pour cibler une société par ID : \`keywords: "CSOC<id>"\`.
+
+Pagination : \`page\`, \`pageSize\` (max 500). Tri : \`sort\` + \`order\`.
+
+Note : il n'y a PAS de filtre \`typeOf\` pour les sociétés dans l'API search. Le type (client/prospect/fournisseur) doit être inféré via le détail de la société (\`boond_companies_get\`).
 
 Returns : liste paginée des sociétés. Utiliser \`boond_companies_get\` ou les outils d'onglets pour le détail.`;
 

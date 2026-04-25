@@ -145,22 +145,24 @@ Returns: Liste des demandes d'absences de la ressource.`,
   },
 ];
 
-const RESOURCE_SEARCH_DESCRIPTION = `Recherche des ressources (collaborateurs internes) dans BoondManager avec filtres avancés côté serveur.
+const RESOURCE_SEARCH_DESCRIPTION = `Recherche des ressources (collaborateurs internes) dans BoondManager avec filtres serveur.
 
-⚠️ IMPORTANT — utilisez les filtres ci-dessous plutôt que de paginer toute la base. Le filtre \`mainManagers\` est la clé pour toute question hiérarchique (N-1, N-2, équipe d'un manager).
+⚠️ Utilisez les filtres structurés plutôt que la pagination intégrale. Les noms de paramètres ci-dessous sont **ceux exacts** de l'API BoondManager — toute autre orthographe est silencieusement ignorée.
 
 Cas d'usage courants :
-• Mes N-1 (équipe directe) : appeler d'abord \`boond_application_current_user\` pour obtenir votre userId, puis \`mainManagers: ["<monUserId>"]\`.
-• Mes N-2 et au-delà : pour chaque N-1 obtenu, rappeler cet outil avec \`mainManagers: ["<idDuN-1>"]\`. Répéter récursivement pour la hiérarchie descendante.
-• Équipe d'un autre manager : \`mainManagers: ["<idDuManager>"]\`.
-• Collaborateurs actifs uniquement : \`states: [1]\` (consulter \`boond_application_dictionary\` avec \`states/resources\` pour les valeurs exactes).
-• Recherche par compétence : \`skills: ["Java", "AWS"]\`, \`tools: ["Kubernetes"]\`.
-• Périmètre organisationnel : \`agencies\`, \`poles\`, \`businessUnits\`.
-• \`keywords\` reste utile pour une recherche plein texte (nom, email) mais ne remplace pas les filtres structurés ci-dessus.
+• **Mes données / mon équipe / mon agence** sans connaître son propre ID : \`perimeterDynamic: ["data"]\` (mes ressources), \`["managers"]\` (mes N-1), \`["agencies"]\` (mes agences).
+• **Équipe d'une personne X** : \`perimeterManagers: [<X_id>]\` (filtre les ressources dont X est le N+1).
+• **Mon ID utilisateur** : appeler \`boond_application_current_user\` puis passer cet ID dans \`perimeterManagers\`.
+• **États / types** : \`resourceStates: [<id>]\`, \`resourceTypes: [<id>]\`. IDs entiers issus du dictionnaire (voir \`boond_application_dictionary\` avec \`setting.state.resource\` ou \`setting.typeOf.resource\`). \`excludeResourceStates\` / \`excludeResourceTypes\` pour exclure.
+• **Périmètre organisationnel** : \`perimeterAgencies\`, \`perimeterPoles\`, \`perimeterBusinessUnits\` (IDs entiers). Combiner avec \`narrowPerimeter: true\` pour ET au lieu de OU.
+• **Compétences / outils** : \`tools: [<toolId>, ...]\` (OU par défaut ; pour ET: \`["#AND#", "1", "2"]\`). \`expertiseAreas\`, \`activityAreas\`, \`languages\` (format \`langueId|niveauId\`).
+• **Disponibilité / activité** : \`period: "available"\` + \`startDate\`/\`endDate\`. Autres valeurs : \`working\`, \`hired\`, \`left\`, \`employed\`, \`birthday\`, \`seniority\`…
+• **Recherche par nom** : \`keywords: "Dupont"\` + \`keywordsType: "lastName"\` (ou \`firstName\`, \`fullName\` avec \`keywords: "Dupont#Jean"\`).
+• **Géolocalisation** : \`coordinates: "48.85,2.35"\` (ou \`location: "Paris"\`) + \`geoDistance: 50\` (km).
 
-Les filtres multivalués (\`mainManagers\`, \`states\`, \`skills\`…) acceptent un tableau ; passer un seul ID dans un tableau d'un élément fonctionne également.
+Pagination : \`page\` (1+), \`pageSize\` (1-500). Tri : \`sort: "lastName"\` (ou firstName/title/availability/state/updateDate/creationDate) + \`order: "asc"|"desc"\`.
 
-Returns : liste paginée des ressources (id, nom, email, ville, état, titre). Utiliser \`boond_resources_get\` ou les outils d'onglets pour le détail.`;
+Returns : liste paginée. Utiliser \`boond_resources_get\` ou les outils d'onglets pour le détail.`;
 
 export function registerResourceTools(server: McpServer): void {
   registerSearchTool(server, OPTS, {
