@@ -3,6 +3,31 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.5.3] - 2026-04-26
+
+Patch metadata pour finaliser la publication de 1.5.2 sur le MCP Registry
+et GHCR. La 1.5.2 a bien été publiée sur **npm** et **GitHub Releases**
+(`.mcpb` attaché), mais les étapes suivantes du workflow ont échoué à
+cause d'un format de schéma incompatible dans `server.json` — résolu ici.
+Aucun changement de comportement côté serveur.
+
+### Corrigé
+
+- `server.json` : `icons[].sizes` était une chaîne (`"128x128"`), le
+  binaire `mcp-publisher` (Go) attend un tableau de chaînes
+  (`["128x128"]`). Le JSON Schema MCP Registry tolérait les deux formes,
+  pas le publisher. Conséquence en 1.5.2 : la publication MCP Registry
+  et la construction de l'image Docker (étapes ultérieures) n'avaient
+  pas pu s'exécuter. 1.5.3 republie l'ensemble (npm + GitHub Release
+  +.mcpb + MCP Registry + GHCR) avec la correction.
+
+### Note
+
+- Pour les utilisateurs ayant déjà installé 1.5.2 via npm ou via le
+  bundle Claude Desktop, **aucune action n'est requise** — le code et
+  les outils sont strictement identiques entre 1.5.2 et 1.5.3, seule la
+  forme du fichier de métadonnées MCP Registry change.
+
 ## [1.5.2] - 2026-04-26
 
 Release principalement orientée **distribution, ergonomie pour le LLM et

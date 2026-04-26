@@ -3,7 +3,7 @@
   "name": "io.github.fauguste/boondmanager-mcp-server",
   "title": "BoondManager MCP Server",
   "description": "MCP Server for BoondManager API - 158 tools across 36 domains for ERP/CRM data",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "websiteUrl": "https://github.com/fauguste/boondmanager-mcp-server",
   "repository": {
     "url": "https://github.com/fauguste/boondmanager-mcp-server",
@@ -13,21 +13,21 @@
     {
       "src": "https://raw.githubusercontent.com/fauguste/boondmanager-mcp-server/main/icon.png",
       "mimeType": "image/png",
-      "sizes": "128x128"
+      "sizes": ["128x128"]
     }
   ],
   "packages": [
     {
       "registryType": "npm",
       "identifier": "boondmanager-mcp-server",
-      "version": "1.5.2",
+      "version": "1.5.3",
       "transport": {
         "type": "stdio"
       }
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/fauguste/boondmanager-mcp-server/releases/download/v1.5.2/boondmanager-mcp-server-v1.5.2.mcpb",
+      "identifier": "https://github.com/fauguste/boondmanager-mcp-server/releases/download/v1.5.3/boondmanager-mcp-server-v1.5.3.mcpb",
       "fileSha256": "PLACEHOLDER",
       "transport": {
         "type": "stdio"
