@@ -73,6 +73,7 @@ const TOOL_REGISTRARS = [
   "registerThreadTools", "registerTodolistTools", "registerFlagTools",
   "registerCalendarTools", "registerWebhookTools", "registerValidationTools",
   "registerPoleTools", "registerReportingTools", "registerPlanningAbsenceTools",
+  "registerWorkflowTools",
 ];
 
 for (const fnName of TOOL_REGISTRARS) {

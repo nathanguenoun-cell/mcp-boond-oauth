@@ -37,6 +37,7 @@ import {
   registerPoleTools,
   registerReportingTools,
   registerPlanningAbsenceTools,
+  registerWorkflowTools,
 } from "./index.js";
 import { registerAllPrompts } from "../prompts/index.js";
 import { registerAllResources } from "../resources/index.js";
@@ -121,19 +122,16 @@ describe("tool/prompt/resource description lengths", () => {
     registerPoleTools(mockServer);
     registerReportingTools(mockServer);
     registerPlanningAbsenceTools(mockServer);
+    registerWorkflowTools(mockServer);
 
     registerAllPrompts(mockServer);
     registerAllResources(mockServer);
   });
 
   it("no tool description exceeds the length limit", () => {
-    const violations = tools.filter(
-      (t) => t.description && t.description.length > MAX_TOOL_DESCRIPTION_LENGTH
-    );
+    const violations = tools.filter((t) => t.description && t.description.length > MAX_TOOL_DESCRIPTION_LENGTH);
     if (violations.length > 0) {
-      const details = violations.map(
-        (t) => `  - ${t.name}: ${t.description?.length} chars`
-      );
+      const details = violations.map((t) => `  - ${t.name}: ${t.description?.length} chars`);
       expect.fail(
         `${violations.length} tool(s) exceed MAX_TOOL_DESCRIPTION_LENGTH (${MAX_TOOL_DESCRIPTION_LENGTH}):\n${details.join("\n")}`
       );
@@ -141,13 +139,9 @@ describe("tool/prompt/resource description lengths", () => {
   });
 
   it("no prompt description exceeds the length limit", () => {
-    const violations = prompts.filter(
-      (p) => p.description && p.description.length > MAX_PROMPT_DESCRIPTION_LENGTH
-    );
+    const violations = prompts.filter((p) => p.description && p.description.length > MAX_PROMPT_DESCRIPTION_LENGTH);
     if (violations.length > 0) {
-      const details = violations.map(
-        (p) => `  - ${p.name}: ${p.description?.length} chars`
-      );
+      const details = violations.map((p) => `  - ${p.name}: ${p.description?.length} chars`);
       expect.fail(
         `${violations.length} prompt(s) exceed MAX_PROMPT_DESCRIPTION_LENGTH (${MAX_PROMPT_DESCRIPTION_LENGTH}):\n${details.join("\n")}`
       );
@@ -155,13 +149,9 @@ describe("tool/prompt/resource description lengths", () => {
   });
 
   it("no resource description exceeds the length limit", () => {
-    const violations = resources.filter(
-      (r) => r.description && r.description.length > MAX_RESOURCE_DESCRIPTION_LENGTH
-    );
+    const violations = resources.filter((r) => r.description && r.description.length > MAX_RESOURCE_DESCRIPTION_LENGTH);
     if (violations.length > 0) {
-      const details = violations.map(
-        (r) => `  - ${r.uri}: ${r.description?.length} chars`
-      );
+      const details = violations.map((r) => `  - ${r.uri}: ${r.description?.length} chars`);
       expect.fail(
         `${violations.length} resource(s) exceed MAX_RESOURCE_DESCRIPTION_LENGTH (${MAX_RESOURCE_DESCRIPTION_LENGTH}):\n${details.join("\n")}`
       );

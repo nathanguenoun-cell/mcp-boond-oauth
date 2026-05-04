@@ -3,7 +3,7 @@
 > Auto-generated from the server registrations. Do not edit by hand.
 > Regenerate with `npm run docs:tools` (CI fails if this file is stale).
 
-**156 tools** across **36 domains** · **11 prompts** · **21 resources**.
+**167 tools** across **37 domains** · **11 prompts** · **21 resources**.
 
 Hint legend: `read` (readOnlyHint), `write` (creates/updates), `delete` (destructiveHint), `idempotent` (idempotentHint), `open-world` (openWorldHint, e.g. paginated keyword search).
 
@@ -344,6 +344,22 @@ Hint legend: `read` (readOnlyHint), `write` (creates/updates), `delete` (destruc
 |---|---|---|
 | `boond_webhooks_get` | Détails d'un webhook | read · idempotent |
 | `boond_webhooks_search` | Rechercher des webhooks | read · idempotent · open-world |
+
+### workflow (11)
+
+| Tool | Title | Hints |
+|---|---|---|
+| `boond_workflow_candidats_pour_opportunite` | Candidats correspondant à une opportunité | read · idempotent |
+| `boond_workflow_cartographie_competences` | Cartographie des compétences d'un périmètre | read · idempotent |
+| `boond_workflow_cvs_a_mettre_a_jour` | Audit fraîcheur des CV / dossiers techniques | read · idempotent |
+| `boond_workflow_factures_a_relancer` | Factures impayées à relancer | read · idempotent |
+| `boond_workflow_fiche_consultant` | Fiche complète d'un collaborateur | read · idempotent |
+| `boond_workflow_fin_de_mission` | Anticipation des fins de mission | read · idempotent |
+| `boond_workflow_pipeline_commercial` | Pipeline commercial sur une période | read · idempotent |
+| `boond_workflow_recap_hebdo` | Récap hebdomadaire (moi + mon équipe) | read · idempotent |
+| `boond_workflow_recherche_profil_competences` | Recherche multi-source d'un profil par compétences | read · idempotent |
+| `boond_workflow_staffing_disponible` | Consultants disponibles pour un staffing | read · idempotent |
+| `boond_workflow_synthese_equipe` | Synthèse d'une équipe | read · idempotent |
 
 ## Prompts (11)
 

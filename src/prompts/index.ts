@@ -21,7 +21,7 @@ const userMessage = (text: string) => ({
   messages: [{ role: "user" as const, content: { type: "text" as const, text } }],
 });
 
-interface PromptDefinition {
+export interface PromptDefinition {
   name: string;
   title: string;
   description: string;
@@ -86,7 +86,7 @@ const ID_OR_NAME_HINT_OPPORTUNITY =
 const ID_OR_NAME_HINT_AGENCY =
   "Accepte soit l'ID numérique, soit le nom de l'agence (résolution auto via `boond_agencies_search`).";
 
-const PROMPTS: PromptDefinition[] = [
+export const PROMPTS: PromptDefinition[] = [
   {
     name: "synthese_equipe",
     title: "Synthèse d'une équipe",

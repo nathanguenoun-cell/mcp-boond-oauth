@@ -39,6 +39,7 @@ import {
   registerPoleTools,
   registerReportingTools,
   registerPlanningAbsenceTools,
+  registerWorkflowTools,
 } from "./tools/index.js";
 import { registerAllPrompts } from "./prompts/index.js";
 import { registerAllResources } from "./resources/index.js";
@@ -70,13 +71,43 @@ function readPackageVersion(): string {
 export const SERVER_VERSION = readPackageVersion();
 
 export const REGISTERED_DOMAINS = [
-  "candidates", "resources", "contacts", "companies", "opportunities", "actions",
-  "timesheets", "projects", "invoices", "orders", "deliveries", "absences",
-  "expenses", "products", "positionings", "payments", "advantages", "application",
-  "contracts", "purchases", "provider-invoices", "accounts", "agencies",
-  "business-units", "roles", "logs", "notifications", "threads", "todolists",
-  "flags", "calendars", "webhooks", "validations", "poles", "reporting",
+  "candidates",
+  "resources",
+  "contacts",
+  "companies",
+  "opportunities",
+  "actions",
+  "timesheets",
+  "projects",
+  "invoices",
+  "orders",
+  "deliveries",
+  "absences",
+  "expenses",
+  "products",
+  "positionings",
+  "payments",
+  "advantages",
+  "application",
+  "contracts",
+  "purchases",
+  "provider-invoices",
+  "accounts",
+  "agencies",
+  "business-units",
+  "roles",
+  "logs",
+  "notifications",
+  "threads",
+  "todolists",
+  "flags",
+  "calendars",
+  "webhooks",
+  "validations",
+  "poles",
+  "reporting",
   "planning-absences",
+  "workflows",
 ] as const;
 
 export function createMcpServer(): McpServer {
@@ -121,6 +152,7 @@ export function createMcpServer(): McpServer {
   registerPoleTools(server);
   registerReportingTools(server);
   registerPlanningAbsenceTools(server);
+  registerWorkflowTools(server);
 
   registerAllPrompts(server);
   registerAllResources(server);
