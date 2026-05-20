@@ -3,6 +3,29 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.0] - 2026-05-20
+
+Le dossier technique (DT) d'une ressource passe en écriture. Jusqu'ici, `boond_resources_technical_data` permettait seulement de lire (compétences, outils, langues, expertises, références), et la seule route d'update côté ressources (`boond_resources_update`) ne couvrait que les champs d'identité. Cas d'usage déclencheur : le formulaire Google Forms envoyé aux consultants Silamir doit pouvoir réinjecter en masse les compétences/expériences déclarées sans saisie manuelle ressource par ressource.
+
+### Ajouté
+
+- **`boond_resources_technical_data_update`** (`src/tools/resources.ts`, `src/schemas/index.ts`) — `PUT /resources/{id}/technical-data`. Deux modes :
+  - `mode: "merge"` (défaut, recommandé pour automation) — enrichit sans rien écraser : `skills` (CSV) dédupliquées en case-insensitive avec préservation du casing existant ; `tools` / `languages` ajoutés uniquement si le slug/la langue est nouveau (les niveaux existants ne sont **jamais** écrasés) ; `expertiseAreas` / `activityAreas` / `diplomas` unionnés ; `title` / `summary` / `training` / `experience` ne sont remplis QUE si actuellement vides. Si rien ne change, l'outil court-circuite sans PUT.
+  - `mode: "replace"` — remplace intégralement chaque champ fourni.
+  Les clés absentes de l'appel ne sont jamais émises dans la requête → garde-fou contre l'écrasement implicite d'une valeur existante par `""`.
+- **`boond_resources_reference_create`** — `POST /resources/{id}/references`. Crée une expérience professionnelle rattachée au DT (champs requis : `resourceId`, `title`, `company`).
+- **`boond_resources_reference_update`** — `PUT /references/{id}`. Met à jour une référence existante ; seuls les champs explicitement fournis sont envoyés à l'API (cas d'usage type : ajouter `startMonth`/`startYear`/`endMonth`/`endYear` sans toucher au titre ni à la description).
+- **`boond_resources_reference_delete`** — `DELETE /references/{id}`, flag `destructiveHint`.
+
+Le helper `mergeTechnicalData` est exporté pour les tests unitaires. Catalogue auto-régénéré : 167 → **171 outils**.
+
+Closes #79.
+
+### Tests
+
+- **+15 tests dans `src/tools/resources.test.ts`** (registration, annotations, handlers `technical_data_update` / `reference_create` / `reference_update` / `reference_delete`) + 7 tests isolés du merge couvrant : skills CSV case-insensitive, niveau d'outil/langue préservé sur entrée existante, scalaires non écrasés quand déjà remplis, dédup string-arrays. **440 tests passants** (vs 425 en 1.8.2).
+- **Validé en live** sur le profil de l'auteur contre `https://ui.boondmanager.com/api` : lecture DT, PUT merge ajoutant un skill + un diplôme de test (les 2 diplômes existants et les 3 outils restent intacts), rollback ramenant le DT à l'état initial.
+
 ## [1.8.2] - 2026-05-08
 
 Correction d'authentification : le client n'arrivait plus à se connecter à BoondManager via la méthode JWT (auto-construit ou pré-construit). L'API renvoyait `422 - Signature verification failed (parameter: jwt)` à chaque requête. Cause : le JWT était envoyé dans `Authorization: Bearer …`, alors que la spec officielle BoondManager exige le header dédié `X-Jwt-Client-Boondmanager`. Le mode BasicAuth (`BOOND_USER` + `BOOND_PASSWORD`) restait fonctionnel via `Authorization: Basic …`.
