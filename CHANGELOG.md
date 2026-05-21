@@ -3,7 +3,9 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [2.0.0-alpha] - 2026-05-21
+
+> **Breaking change majeur** : le transport HTTP passe d'une auth shared-secret + JWT cote serveur a une auth OAuth2 *protected resource* (le Bearer token est porte par chaque requete MCP). Pas de migration possible — c'est une nouvelle architecture, d'ou le bump majeur. Le transport stdio reste inchange. Voir `docs/oauth.md` pour la procedure complete.
 
 ### Added
 
