@@ -49,12 +49,17 @@ const ENV_KEYS = [
   "MCP_HTTP_HOST",
   "MCP_HTTP_PATH",
   "MCP_HTTP_STATEFUL",
-  "MCP_HTTP_BEARER_TOKEN",
   "MCP_HTTP_JSON_RESPONSE",
   "MCP_HTTP_SESSION_TTL_MS",
   "MCP_HTTP_SESSION_SWEEP_INTERVAL_MS",
   "MCP_HTTP_ALLOWED_HOSTS",
+  "MCP_HTTP_PUBLIC_URL",
+  "BOOND_OAUTH_AUTHORIZATION_SERVER",
+  "BOOND_OAUTH_SCOPES",
 ];
+
+/** Shorthand for an authenticated MCP request body (OAuth Bearer required). */
+const AUTH_HEADER = { Authorization: "Bearer test-access-token" };
 
 function clearEnv(): void {
   for (const key of ENV_KEYS) delete process.env[key];
@@ -71,7 +76,7 @@ describe("resolveHttpOptions", () => {
     expect(opts.path).toBe("/mcp");
     expect(opts.stateless).toBe(true);
     expect(opts.enableJsonResponse).toBe(false);
-    expect(opts.bearerToken).toBeUndefined();
+    expect(opts.publicUrl).toBeUndefined();
     expect(opts.sessionTtlMs).toBe(30 * 60_000);
     expect(opts.sessionSweepIntervalMs).toBe(5 * 60_000);
   });
@@ -97,16 +102,16 @@ describe("resolveHttpOptions", () => {
     process.env["MCP_HTTP_HOST"] = "0.0.0.0";
     process.env["MCP_HTTP_PATH"] = "/api/mcp";
     process.env["MCP_HTTP_STATEFUL"] = "true";
-    process.env["MCP_HTTP_BEARER_TOKEN"] = "sekret";
     process.env["MCP_HTTP_JSON_RESPONSE"] = "true";
+    process.env["MCP_HTTP_PUBLIC_URL"] = "https://mcp.example.com/api/mcp";
 
     const opts = resolveHttpOptions();
     expect(opts.port).toBe(4242);
     expect(opts.host).toBe("0.0.0.0");
     expect(opts.path).toBe("/api/mcp");
     expect(opts.stateless).toBe(false);
-    expect(opts.bearerToken).toBe("sekret");
     expect(opts.enableJsonResponse).toBe(true);
+    expect(opts.publicUrl).toBe("https://mcp.example.com/api/mcp");
   });
 
   it("ignores unresolved ${...} placeholders", () => {
@@ -182,17 +187,20 @@ describe("startHttpTransport (integration)", () => {
       stateless: true,
       enableJsonResponse: true,
     });
-    const res = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`);
+    // GET on the MCP endpoint still needs to be authenticated — the 401
+    // challenge fires before stateless-vs-stateful routing.
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`, {
+      headers: AUTH_HEADER,
+    });
     expect(res.status).toBe(405);
   });
 
-  it("rejects unauthorized requests when a bearer token is configured", async () => {
+  it("returns 401 with a WWW-Authenticate challenge when no Bearer token is present", async () => {
     handle = await startHttpTransport(createMcpServer, {
       host: "127.0.0.1",
       port: 34569,
       path: "/mcp",
       stateless: true,
-      bearerToken: "sekret",
       enableJsonResponse: true,
     });
     const res = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`, {
@@ -200,7 +208,74 @@ describe("startHttpTransport (integration)", () => {
       body: "{}",
     });
     expect(res.status).toBe(401);
-    expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    const challenge = res.headers.get("www-authenticate") ?? "";
+    expect(challenge).toMatch(/^Bearer /);
+    expect(challenge).toContain("resource_metadata=");
+    expect(challenge).toContain("/.well-known/oauth-protected-resource/mcp");
+  });
+
+  it("rejects requests with a non-Bearer Authorization scheme", async () => {
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34579,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+    });
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`, {
+      method: "POST",
+      headers: { Authorization: "Basic dGVzdDp0ZXN0" },
+      body: "{}",
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("publishes RFC 9728 protected-resource metadata at /.well-known/oauth-protected-resource", async () => {
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34580,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+      publicUrl: "https://mcp.example.com/mcp",
+    });
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/.well-known/oauth-protected-resource`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const doc = (await res.json()) as Record<string, unknown>;
+    expect(doc["resource"]).toBe("https://mcp.example.com/mcp");
+    expect(doc["authorization_servers"]).toEqual(["https://ui.boondmanager.com"]);
+    expect(doc["bearer_methods_supported"]).toEqual(["header"]);
+  });
+
+  it("serves the path-suffixed metadata variant per RFC 9728 §3.2", async () => {
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34581,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+    });
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/.well-known/oauth-protected-resource/mcp`);
+    expect(res.status).toBe(200);
+    const doc = (await res.json()) as Record<string, unknown>;
+    expect(typeof doc["resource"]).toBe("string");
+  });
+
+  it("honours BOOND_OAUTH_AUTHORIZATION_SERVER + BOOND_OAUTH_SCOPES in the discovery metadata", async () => {
+    process.env["BOOND_OAUTH_AUTHORIZATION_SERVER"] = "https://custom.boondmanager.com";
+    process.env["BOOND_OAUTH_SCOPES"] = "candidates,resources";
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34582,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+    });
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/.well-known/oauth-protected-resource`);
+    const doc = (await res.json()) as Record<string, unknown>;
+    expect(doc["authorization_servers"]).toEqual(["https://custom.boondmanager.com"]);
+    expect(doc["scopes_supported"]).toEqual(["candidates", "resources"]);
   });
 
   it("reaps idle stateful sessions on sweep", async () => {
@@ -221,6 +296,7 @@ describe("startHttpTransport (integration)", () => {
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
+        ...AUTH_HEADER,
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -285,11 +361,11 @@ describe("startHttpTransport (integration)", () => {
           clientInfo: { name: "vitest", version: "1.0.0" },
         },
       }),
-      { Accept: "application/json, text/event-stream" }
+      { Accept: "application/json, text/event-stream", ...AUTH_HEADER }
     );
     expect(okRes.status).toBe(200);
 
-    const koRes = await postWithHost(handle.address.port, "/mcp", "other.example.com", "{}");
+    const koRes = await postWithHost(handle.address.port, "/mcp", "other.example.com", "{}", AUTH_HEADER);
     expect(koRes.status).toBe(403);
   });
 
@@ -316,7 +392,7 @@ describe("startHttpTransport (integration)", () => {
           clientInfo: { name: "vitest", version: "1.0.0" },
         },
       }),
-      { Accept: "application/json, text/event-stream" }
+      { Accept: "application/json, text/event-stream", ...AUTH_HEADER }
     );
     expect(res.status).toBe(200);
   });
@@ -334,6 +410,7 @@ describe("startHttpTransport (integration)", () => {
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
+        ...AUTH_HEADER,
       },
       body: JSON.stringify({
         jsonrpc: "2.0",

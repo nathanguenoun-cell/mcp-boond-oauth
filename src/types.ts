@@ -23,10 +23,16 @@ export interface JsonApiResponse {
   links?: Record<string, string>;
 }
 
+/**
+ * Async auth provider. Returning a fresh header on every call lets us
+ * support both static credentials (returns the same value forever) and
+ * OAuth2 (refreshes the access token transparently before expiry).
+ */
+export type BoondAuthProvider = () => Promise<{ name: string; value: string }>;
+
 export interface BoondConfig {
   baseUrl: string;
-  authHeaderName: string;
-  authHeaderValue: string;
+  auth: BoondAuthProvider;
 }
 
 export interface SearchParams {

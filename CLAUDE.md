@@ -44,7 +44,8 @@ src/
 ├── transports/
 │   └── http.ts           # startHttpTransport() + resolveHttpOptions() — MCP Streamable HTTP server
 ├── services/
-│   ├── boond-client.ts   # HTTP client: apiRequest(), buildSearchQuery(), formatListResponse(), formatDetailResponse(), parseBoondErrorBody(), formatApiError()
+│   ├── boond-client.ts   # HTTP client: apiRequest(), buildSearchQuery(), formatListResponse(), formatDetailResponse(), parseBoondErrorBody(), formatApiError(); initClient() (stdio) / initClientWithAuth() (OAuth); oauthContextAuth (reads AsyncLocalStorage)
+│   ├── oauth.ts          # OAuth2 protected-resource plumbing for the HTTP transport: oauthContext (AsyncLocalStorage), extractBearerToken(), buildProtectedResourceMetadata() (RFC 9728). No state, no client_secret.
 │   ├── rate-limiter.ts   # Token-bucket rate limiter for BoondManager API
 │   └── logger.ts         # Structured logger (pino) + generateCorrelationId()
 ├── schemas/
@@ -301,8 +302,8 @@ are what the client surfaces.
 
 The server selects its transport from `MCP_TRANSPORT`:
 
-- **`stdio`** (default): wraps `StdioServerTransport`, used by Claude Desktop / Claude Code locally.
-- **`http`** (alias: `streamable-http`): starts a Node HTTP server using `StreamableHTTPServerTransport` from the MCP SDK. Intended for MCP gateways and remote deployments.
+- **`stdio`** (default): wraps `StdioServerTransport`, used by Claude Desktop / Claude Code locally. Auth: JWT (X-Jwt-Client-Boondmanager) or BasicAuth via env vars.
+- **`http`** (alias: `streamable-http`): starts a Node HTTP server using `StreamableHTTPServerTransport` from the MCP SDK. Intended for MCP gateways and remote deployments. **Auth: OAuth2 protected resource** — the server holds no tokens; each MCP request must carry `Authorization: Bearer <boond_access_token>` and is forwarded verbatim to BoondManager. See the *Authentication → http transport* section below.
 
 HTTP env vars (see `src/transports/http.ts::resolveHttpOptions`):
 
@@ -312,8 +313,8 @@ HTTP env vars (see `src/transports/http.ts::resolveHttpOptions`):
 | `MCP_HTTP_PORT` | `3000` | TCP port |
 | `MCP_HTTP_PATH` | `/mcp` | Endpoint path |
 | `MCP_HTTP_STATEFUL` | `false` | `true` to enable session mode (`Mcp-Session-Id`) |
-| `MCP_HTTP_BEARER_TOKEN` | — | Require `Authorization: Bearer <token>` on every request |
 | `MCP_HTTP_JSON_RESPONSE` | `false` | `true` to return JSON instead of SSE streams |
+| `MCP_HTTP_PUBLIC_URL` | (derived) | Public URL advertised in the OAuth2 discovery metadata. Required behind a reverse proxy. |
 | `MCP_HTTP_SESSION_TTL_MS` | `1800000` (30 min) | Stateful only: idle window before a session is closed |
 | `MCP_HTTP_SESSION_SWEEP_INTERVAL_MS` | `300000` (5 min) | Stateful only: how often to scan for idle sessions |
 | `MCP_HTTP_ALLOWED_HOSTS` | (auto) | Comma-separated allow-list of `Host` header hostnames for DNS rebinding protection (CVE-2025-66414). Default = `localhost,127.0.0.1,[::1]` when bound to a loopback interface, otherwise validation is disabled. Set to `*` to opt out explicitly when fronting the server with a reverse proxy that already validates hosts. |
@@ -322,7 +323,12 @@ Stateless mode spins up a fresh `McpServer`+`StreamableHTTPServerTransport` per 
 
 ## Authentication
 
-Configured via environment variables (never hardcoded), in priority order:
+Two distinct models depending on the transport — **stdio** uses the
+existing env-based credentials (single identity, integrator-side);
+**http** is an **OAuth2 protected resource** (multi-tenant, per-user,
+per-request).
+
+### stdio transport (env-based, priority order)
 
 1. **JWT from components** (recommended):
    - `BOOND_USER_TOKEN` — User token (BoondManager → Mon compte → Clé d'API)
@@ -331,6 +337,51 @@ Configured via environment variables (never hardcoded), in priority order:
    - The server generates the JWT (HS256) automatically from these 3 values.
 2. **Pre-built JWT**: `BOOND_API_TOKEN` (JWT Bearer)
 3. **BasicAuth**: `BOOND_USER` + `BOOND_PASSWORD` (base64-encoded)
+
+JWT travels in `X-Jwt-Client-Boondmanager`, BasicAuth in `Authorization`.
+
+### http transport (OAuth2 — protected resource model)
+
+The HTTP server is an **OAuth2 protected resource** (per the MCP
+Authorization 2025-06-18 spec and RFC 9728). It holds **no OAuth state**:
+no `client_secret`, no refresh token, no per-user storage. The flow:
+
+1. The MCP client (Claude Desktop, Claude Code, gateway, …) initiates
+   the OAuth dance against BoondManager directly. The user grants
+   consent to the BoondManager App in their browser; the client receives
+   an `access_token` and a `refresh_token`.
+2. On every MCP request the client sends
+   `Authorization: Bearer <access_token>`.
+3. The HTTP transport (`src/transports/http.ts`) extracts the Bearer
+   token before dispatching to the SDK's `StreamableHTTPServerTransport`,
+   wraps the handler in `oauthContext.run({ accessToken }, …)`.
+4. When a tool fires an API call, `oauthContextAuth` in `boond-client.ts`
+   reads the token out of the AsyncLocalStorage context and forwards it
+   verbatim to BoondManager as `Authorization: Bearer <access_token>`.
+5. The MCP client refreshes its own tokens — the server never sees the
+   refresh flow.
+
+Discovery: the server publishes RFC 9728 protected-resource metadata at
+`/.well-known/oauth-protected-resource` (and at the path-suffixed variant
+`/.well-known/oauth-protected-resource{MCP_HTTP_PATH}` per RFC 9728 §3.2).
+Missing/invalid Bearer tokens get a 401 with
+`WWW-Authenticate: Bearer realm="…", resource_metadata="…"` pointing at
+that endpoint. MCP-spec-compliant clients use this to auto-discover the
+BoondManager authorization server.
+
+Env vars for the HTTP path (all optional — only `MCP_HTTP_PUBLIC_URL`
+really matters in production):
+
+| Var | Purpose |
+|-----|---------|
+| `MCP_HTTP_PUBLIC_URL` | Public URL advertised as the OAuth2 resource identifier (and in the `realm` of the 401 challenge). Required when fronted by a reverse proxy. Defaults to `http://<host>:<port><path>`. |
+| `BOOND_OAUTH_AUTHORIZATION_SERVER` | Issuer URL of the BoondManager authorization server, advertised in `authorization_servers`. Defaults to `https://ui.boondmanager.com`. |
+| `BOOND_OAUTH_SCOPES` | Space/comma-separated scope hints advertised in `scopes_supported`. Empty = clients negotiate directly with Boond. |
+
+Implementation: `src/services/oauth.ts` (AsyncLocalStorage context,
+header parsing, metadata builder), `src/transports/http.ts` (Bearer
+extraction + discovery endpoint + 401 challenge), `src/services/boond-client.ts`
+(`oauthContextAuth` provider). Full setup guide: `docs/oauth.md`.
 - `BOOND_BASE_URL` (optional, defaults to `https://ui.boondmanager.com/api`)
 - `BOOND_HTTP_TIMEOUT_MS` (optional, defaults to `30000`) — per-request timeout for the BoondManager HTTP client. Non-numeric / non-positive values fall back to the default. A timeout surfaces as an `Error` whose message includes the configured value and the failing endpoint.
 - `BOOND_HTTP_MAX_RETRIES` (optional, defaults to `2`) — number of additional attempts after the first failure. Set to `0` to disable retries. Retry policy: GET retries on 5xx / 429 / network / timeout; non-GET retries only on 429 (idempotency safety). `Retry-After` is honoured.
@@ -345,10 +396,22 @@ Configured via environment variables (never hardcoded), in priority order:
   - **GitHub Releases** with `.mcpb` bundle attached; release body extracted from the matching `## [X.Y.Z]` section of `CHANGELOG.md`
   - **MCP Registry** via `mcp-publisher` with GitHub OIDC
   - **GHCR** (`ghcr.io/fauguste/boondmanager-mcp-server`) — multi-arch (`linux/amd64`+`linux/arm64`) with provenance + SBOM, tags `:X.Y.Z` `:X.Y` `:X` `:latest`
+  - **Docker Hub** (`docker.io/{DOCKERHUB_USERNAME}/boondmanager-mcp-server`) — same multi-arch image, same tags. Gated on the `DOCKERHUB_TOKEN` repo secret being present, so forks without the secret skip Docker Hub without failing the release.
+- **Docker publish (manual)** (`.github/workflows/docker-publish.yml`): `workflow_dispatch`-only. Inputs: `tag` (required), `ref` (optional git ref to build), `platforms`, `push_latest` (boolean). Pushes to GHCR + Docker Hub. Use for release candidates, feature-branch images, or ad-hoc re-publishes.
 - **CodeQL** (`.github/workflows/codeql.yml`): static analysis for JS/TS and GitHub Actions.
 - **API Monitor** (`.github/workflows/api-monitor.yml`): Hebdomadaire (lundis 9h UTC), surveille la documentation officielle BoondManager (`https://doc.boondmanager.com/api-externe/raml-build/`), compare avec le snapshot précédent (`.github/api-snapshot.json`), crée une issue GitHub si nouveautés détectées. Documentation complète: `.github/API_MONITORING.md`.
 - **Dependabot**: configured for npm and GitHub Actions.
 - **Distribution**: `docs/distribution.md` is the single source of truth for what ships where and the few manual one-time actions still outstanding (GitHub topics, awesome-mcp-servers PR, Glama/PulseMCP/mcp.so submissions).
+
+### Required GitHub secrets
+
+| Secret | Used by | Purpose |
+|--------|---------|---------|
+| `NPM_TOKEN` | `release.yml` | npm publish (automation token, scoped to this package) |
+| `DOCKERHUB_USERNAME` | `release.yml`, `docker-publish.yml` | Docker Hub user/org that owns the published repo |
+| `DOCKERHUB_TOKEN` | `release.yml`, `docker-publish.yml` | Docker Hub access token (Account Settings → Security) |
+
+`GITHUB_TOKEN` is auto-provided by GitHub Actions and covers GHCR, GitHub Releases, and CodeQL — no extra setup. The MCP Registry uses GitHub OIDC (no secret).
 
 ## Code Style
 

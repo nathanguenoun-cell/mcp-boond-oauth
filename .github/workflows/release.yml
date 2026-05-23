@@ -42,7 +42,8 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Verify version matches tag
+      - name: Verify version matches tag + detect prerelease
+        id: version
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
@@ -50,6 +51,25 @@ jobs:
             echo "ERROR: package.json version ($PACKAGE_VERSION) does not match tag (v$TAG_VERSION)"
             exit 1
           fi
+          # SemVer prereleases carry a `-foo` suffix (e.g. 2.0.0-alpha, 1.5.0-rc1).
+          # We branch on that to avoid moving `:latest` / publishing under the
+          # default npm dist-tag etc.
+          if echo "$TAG_VERSION" | grep -q -- '-'; then
+            IS_PRERELEASE=true
+            # npm dist-tag = the identifier before any dot — "alpha", "beta", "rc".
+            NPM_TAG=$(echo "$TAG_VERSION" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+-([a-zA-Z0-9]+).*/\1/')
+            if [ -z "$NPM_TAG" ] || [ "$NPM_TAG" = "$TAG_VERSION" ]; then
+              echo "ERROR: failed to derive npm dist-tag from $TAG_VERSION"
+              exit 1
+            fi
+          else
+            IS_PRERELEASE=false
+            NPM_TAG=latest
+          fi
+          echo "tag_version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "npm_tag=$NPM_TAG" >> "$GITHUB_OUTPUT"
+          echo "Detected: version=$TAG_VERSION prerelease=$IS_PRERELEASE npm_tag=$NPM_TAG"
 
       - name: Build MCPB bundle
         run: |
@@ -57,7 +77,10 @@ jobs:
           npx @anthropic-ai/mcpb pack . "boondmanager-mcp-server-v${TAG_VERSION}.mcpb"
 
       - name: Publish to npm
-        run: npm publish --provenance --access public
+        # `--tag <npm_tag>` ensures prereleases land under e.g. `@alpha`
+        # rather than overwriting the default `latest` dist-tag and reaching
+        # users running `npm install boondmanager-mcp-server` without a tag.
+        run: npm publish --provenance --access public --tag "${{ steps.version.outputs.npm_tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -85,6 +108,7 @@ jobs:
           body_path: RELEASE_NOTES.md
           generate_release_notes: true
           files: "*.mcpb"
+          prerelease: ${{ steps.version.outputs.is_prerelease }}
 
       - name: Update server.json for MCP Registry
         run: |
@@ -118,9 +142,10 @@ jobs:
 
       # ---- Docker image (HTTP gateway mode) ----
       # Multi-arch image so it runs on both x86 servers and Apple-Silicon /
-      # Graviton hosts. Pushed to GHCR alongside the npm/MCP Registry artifacts
-      # so users running LobeChat or a custom MCP gateway can `docker pull`
-      # the same version they would `npm install`.
+      # Graviton hosts. Pushed to GHCR (always) and Docker Hub (when the
+      # DOCKERHUB_TOKEN secret is set) alongside the npm/MCP Registry
+      # artifacts, so users running LobeChat or a custom MCP gateway can
+      # `docker pull` the same version they would `npm install`.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -134,23 +159,58 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Docker Hub login is conditional: forks without the secret skip it
+      # rather than failing the entire release. The compute-tags step below
+      # uses the same env trick to decide whether to add Docker Hub tags.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v4
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Compute image tags
         id: image_tags
+        env:
+          TAG_VERSION: ${{ steps.version.outputs.tag_version }}
+          IS_PRERELEASE: ${{ steps.version.outputs.is_prerelease }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          MAJOR_MINOR="$(echo "$TAG_VERSION" | awk -F. '{print $1"."$2}')"
-          MAJOR="$(echo "$TAG_VERSION" | awk -F. '{print $1}')"
-          # On every release we publish four moving tags:
+          # Strip suffix on numeric segments to derive MAJOR / MAJOR_MINOR.
+          # "2.0.0-alpha" -> MAJOR=2, MAJOR_MINOR=2.0 (used for stable only).
+          NUMERIC_VERSION="$(echo "$TAG_VERSION" | sed -E 's/-.*$//')"
+          MAJOR_MINOR="$(echo "$NUMERIC_VERSION" | awk -F. '{print $1"."$2}')"
+          MAJOR="$(echo "$NUMERIC_VERSION" | awk -F. '{print $1}')"
+          GHCR_REPO="ghcr.io/${{ github.repository_owner }}/boondmanager-mcp-server"
+          DOCKERHUB_REPO="${DOCKERHUB_USERNAME}/boondmanager-mcp-server"
+          # On a stable release we publish four moving tags per registry:
           #   :<exact>   pinned, the only tag we recommend in production manifests
           #   :<X.Y>     latest patch of a minor (auto-update inside a minor)
           #   :<X>       latest minor of a major (broader, opt-in to new features)
           #   :latest    bleeding edge — convenient for demos, never for prod
+          # For prereleases (X.Y.Z-foo) we publish ONLY the pinned tag, to avoid
+          # silently bumping users on `:latest` / `:X` / `:X.Y`.
           {
             echo "tags<<EOF"
-            echo "ghcr.io/${{ github.repository_owner }}/boondmanager-mcp-server:${TAG_VERSION}"
-            echo "ghcr.io/${{ github.repository_owner }}/boondmanager-mcp-server:${MAJOR_MINOR}"
-            echo "ghcr.io/${{ github.repository_owner }}/boondmanager-mcp-server:${MAJOR}"
-            echo "ghcr.io/${{ github.repository_owner }}/boondmanager-mcp-server:latest"
+            echo "${GHCR_REPO}:${TAG_VERSION}"
+            if [ "$IS_PRERELEASE" != "true" ]; then
+              echo "${GHCR_REPO}:${MAJOR_MINOR}"
+              echo "${GHCR_REPO}:${MAJOR}"
+              echo "${GHCR_REPO}:latest"
+            fi
+            if [ -n "$DOCKERHUB_TOKEN" ] && [ -n "$DOCKERHUB_USERNAME" ]; then
+              echo "${DOCKERHUB_REPO}:${TAG_VERSION}"
+              if [ "$IS_PRERELEASE" != "true" ]; then
+                echo "${DOCKERHUB_REPO}:${MAJOR_MINOR}"
+                echo "${DOCKERHUB_REPO}:${MAJOR}"
+                echo "${DOCKERHUB_REPO}:latest"
+              fi
+            else
+              echo "::notice ::DOCKERHUB_TOKEN secret not set — skipping Docker Hub publish."
+            fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 

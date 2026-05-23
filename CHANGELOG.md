@@ -3,6 +3,45 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.0.0] - 2026-05-23
+
+> **Promotion de [`2.0.0-alpha`](#200-alpha---2026-05-21) en stable** apres smoke test reel : conteneur Docker pull/run depuis Docker Hub, discovery `/.well-known/oauth-protected-resource` + 401 challenge `WWW-Authenticate` verifies, rejet du scheme non-Bearer confirme, handshake MCP `initialize` traverse end-to-end (serverInfo `2.0.0-alpha`, protocol `2025-06-18`).
+
+Aucun changement de code par rapport a 2.0.0-alpha. Seule difference : README mis a jour (badges Docker Hub + GHCR, section *Docker (image officielle)* qui liste les deux registres miroirs avec leurs liens, note sur le scoping des tags de prerelease). Pour le contenu fonctionnel de la 2.x, voir l'entree 2.0.0-alpha ci-dessous.
+
+### Migration depuis 1.x
+
+- **Transport stdio** : aucune action. JWT / BasicAuth via env vars (`BOOND_USER_TOKEN` + `BOOND_CLIENT_TOKEN` + `BOOND_CLIENT_KEY`, ou `BOOND_API_TOKEN`, ou `BOOND_USER` + `BOOND_PASSWORD`) fonctionnent comme avant.
+- **Transport HTTP** : breaking. Si tu utilisais `MCP_HTTP_BEARER_TOKEN` comme shared secret transport-level, supprime-le — il a disparu (il est remplace par l'OAuth Bearer per-user porte par chaque requete). Si tu publiais des credentials Boond cote serveur (env vars JWT/BasicAuth sur le conteneur HTTP), supprime-les egalement — le serveur n'en a plus besoin. A la place : enregistre une App OAuth2 dans BoondManager (*Administration -> Apps -> Security*) et configure ton client MCP pour qu'il fasse la danse OAuth contre Boond, le serveur ne fait que forwarder le Bearer. Procedure complete dans `docs/oauth.md`.
+
+## [2.0.0-alpha] - 2026-05-21
+
+> **Breaking change majeur** : le transport HTTP passe d'une auth shared-secret + JWT cote serveur a une auth OAuth2 *protected resource* (le Bearer token est porte par chaque requete MCP). Pas de migration possible — c'est une nouvelle architecture, d'ou le bump majeur. Le transport stdio reste inchange. Voir `docs/oauth.md` pour la procedure complete.
+
+### Added
+
+- **OAuth2 protected resource sur le transport HTTP.** Le serveur HTTP devient un *protected resource* (spec MCP Authorization 2025-06-18 + RFC 9728) : **aucun secret n'est detenu cote serveur** (pas de `client_secret`, pas de refresh token, pas de stockage utilisateur). Chaque requete MCP doit porter `Authorization: Bearer <boond_access_token>` ; le serveur transmet le token verbatim a BoondManager. Le **client MCP** (Claude Desktop, Claude Code, gateway…) execute la danse OAuth contre BoondManager directement et gere son propre refresh. Multi-tenant par construction : chaque utilisateur agit sous sa propre identite Boond (audit log preserve).
+- **Discovery RFC 9728** : nouvel endpoint public `/.well-known/oauth-protected-resource` (et son variant path-suffixe `…/{MCP_HTTP_PATH}` per §3.2) qui annonce `resource`, `authorization_servers`, `bearer_methods_supported`, et `scopes_supported`. Les 401 emettent un challenge `WWW-Authenticate: Bearer realm="…", resource_metadata="…"` permettant aux clients MCP conformes de decouvrir automatiquement l'authorization server BoondManager.
+- **Provider d'auth dynamique** dans `boond-client` (`initClientWithAuth()` + `oauthContextAuth`) : resolution de l'en-tête par requete via `AsyncLocalStorage`, qui isole les Bearer tokens entre utilisateurs concurrents sur la meme instance HTTP.
+- **Packaging Docker** entierement stateless (HTTP+OAuth2) : `Dockerfile` sans volume, `docker-compose.yml` reduit a un seul service, `.env.example` qui ne contient que des variables optionnelles. Plus de profile `bootstrap`, plus de credentials a persister. L'healthcheck cible le endpoint de discovery (200 sans auth).
+- **Publication Docker dual-registry.** Le workflow `release.yml` pousse maintenant l'image multi-arch a la fois sur GHCR (`ghcr.io/fauguste/boondmanager-mcp-server`) et sur Docker Hub (`docker.io/{DOCKERHUB_USERNAME}/boondmanager-mcp-server`), avec les memes tags `:X.Y.Z` / `:X.Y` / `:X` / `:latest`. La publication Docker Hub est conditionnee a la presence du secret `DOCKERHUB_TOKEN`, pour que les forks sans configuration ne fassent pas echouer le release.
+- **Nouveau workflow manuel `.github/workflows/docker-publish.yml`** (`workflow_dispatch`) pour pousser un tag ad-hoc (RC, branche feature, re-publication) sur les deux registries sans re-couper de release npm. Inputs : `tag`, `ref` (git ref), `platforms`, `push_latest`.
+- Documentation complete : `docs/oauth.md` reecrit avec le bon modele (client-side OAuth, server passthrough, discovery), section *Authentication* de `CLAUDE.md`, section HTTP du README.
+
+### Changed
+
+- **`BoondConfig` passe a un `BoondAuthProvider` async** (resolution per-request) ; `initClient()` (stdio) reste inchange du point de vue API. Stdio garde les 3 methodes JWT / BasicAuth existantes (`BOOND_USER_TOKEN`+`CLIENT_TOKEN`+`CLIENT_KEY`, `BOOND_API_TOKEN`, `BOOND_USER`+`PASSWORD`).
+- **Nouvelle variable `MCP_HTTP_PUBLIC_URL`** pour annoncer la bonne URL externe derriere un reverse proxy.
+
+### Removed
+
+- **`MCP_HTTP_BEARER_TOKEN`** : superflu — l'auth est portee par le Bearer OAuth2 du user, pas par un secret partage cote transport.
+- **CLI `boondmanager-mcp-oauth-login`** + bin + script `oauth:login` : plus de bootstrap serveur, le client fait la danse OAuth directement.
+
+### Tests
+
+- **+34 tests** (`src/services/oauth.test.ts` reecrit : 25 tests sur l'extraction Bearer, l'AsyncLocalStorage, la metadata RFC 9728 ; nouveau bloc `oauthContextAuth` dans `boond-client.test.ts` qui couvre l'isolation multi-tenant concurrente ; +6 tests d'integration HTTP couvrant 401+challenge, discovery sur les deux variants, override de l'authorization server). **471 tests passants** au total.
+
 ## [1.9.1] - 2026-05-20
 
 Patch correctif sur les trois outils `boond_resources_reference_{create,update,delete}` introduits en 1.9.0. La spec d'origine (issue #79) supposait des endpoints REST autonomes (`POST /resources/{id}/references`, `PUT /references/{id}`, `DELETE /references/{id}`) — sondage live de l'API : aucun de ces endpoints n'existe. Les références sont **embarquées** dans le DT (sous-objet `attributes.references[]` de `/resources/{id}/technical-data`), donc tout le CRUD passe par un `PUT /resources/{id}/technical-data` avec la liste complète à jour.

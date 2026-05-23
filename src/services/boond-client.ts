@@ -9,10 +9,30 @@ import {
   DEFAULT_HTTP_RATE_LIMIT_RPS,
   DEFAULT_HTTP_RATE_LIMIT_BURST,
 } from "../constants.js";
-import type { BoondConfig, JsonApiResponse, SearchParams } from "../types.js";
+import type { BoondAuthProvider, BoondConfig, JsonApiResponse, SearchParams } from "../types.js";
 import { TokenBucket } from "./rate-limiter.js";
+import { oauthContext } from "./oauth.js";
 
 let config: BoondConfig | null = null;
+
+/**
+ * Auth provider for the HTTP transport: reads the Bearer token from the
+ * per-request AsyncLocalStorage populated by the transport layer and
+ * forwards it verbatim to BoondManager as `Authorization: Bearer …`.
+ *
+ * Errors out clearly if called outside a request context — which would
+ * indicate that the transport layer forgot to wrap the request in
+ * `oauthContext.run(...)`.
+ */
+export const oauthContextAuth: BoondAuthProvider = async () => {
+  const ctx = oauthContext.getStore();
+  if (!ctx) {
+    throw new Error(
+      "No OAuth access token in request context. The HTTP transport requires an `Authorization: Bearer <boond_access_token>` header on every request."
+    );
+  }
+  return { name: "Authorization", value: `Bearer ${ctx.accessToken}` };
+};
 
 function base64url(data: string | Buffer): string {
   const b64 = Buffer.from(data).toString("base64");
@@ -35,10 +55,19 @@ function envOrUndefined(key: string): string | undefined {
 
 export const JWT_HEADER_NAME = "X-Jwt-Client-Boondmanager";
 
+/**
+ * Wrap a static header pair in the dynamic AuthProvider contract.
+ * Used by the stdio transport, which sticks to the JWT / BasicAuth paths.
+ */
+function staticAuth(name: string, value: string): BoondAuthProvider {
+  const cached = Promise.resolve({ name, value });
+  return () => cached;
+}
+
 export function initClient(): void {
   const baseUrl = envOrUndefined("BOOND_BASE_URL") || DEFAULT_BASE_URL;
 
-  // Auth priority:
+  // Auth priority (stdio transport):
   // 1. Build JWT from components (userToken + clientToken + clientKey)
   // 2. Pre-built JWT token
   // 3. BasicAuth (user:password)
@@ -47,6 +76,8 @@ export function initClient(): void {
   // `X-Jwt-Client-Boondmanager` header — sending it as `Authorization: Bearer`
   // makes the API reject the request with 422 "Signature verification failed".
   // BasicAuth, on the other hand, uses the standard `Authorization` header.
+  //
+  // HTTP transport uses OAuth2 exclusively — see `initClientWithAuth`.
   const userToken = envOrUndefined("BOOND_USER_TOKEN");
   const clientToken = envOrUndefined("BOOND_CLIENT_TOKEN");
   const clientKey = envOrUndefined("BOOND_CLIENT_KEY");
@@ -54,25 +85,38 @@ export function initClient(): void {
   const user = envOrUndefined("BOOND_USER");
   const password = envOrUndefined("BOOND_PASSWORD");
 
-  let authHeaderName: string;
-  let authHeaderValue: string;
+  let auth: BoondAuthProvider;
 
   if (userToken && clientToken && clientKey) {
-    authHeaderName = JWT_HEADER_NAME;
-    authHeaderValue = buildJwt(userToken, clientToken, clientKey);
+    auth = staticAuth(JWT_HEADER_NAME, buildJwt(userToken, clientToken, clientKey));
   } else if (token) {
-    authHeaderName = JWT_HEADER_NAME;
-    authHeaderValue = token;
+    auth = staticAuth(JWT_HEADER_NAME, token);
   } else if (user && password) {
-    authHeaderName = "Authorization";
-    authHeaderValue = `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`;
+    auth = staticAuth("Authorization", `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`);
   } else {
     throw new Error(
       "Authentication required. Set BOOND_USER_TOKEN + BOOND_CLIENT_TOKEN + BOOND_CLIENT_KEY, or BOOND_API_TOKEN, or both BOOND_USER and BOOND_PASSWORD."
     );
   }
 
-  config = { baseUrl, authHeaderName, authHeaderValue };
+  config = { baseUrl, auth };
+}
+
+/**
+ * Install a custom auth provider — used by the HTTP transport bootstrap to
+ * wire in an OAuth2 token source (where the access token is refreshed
+ * transparently per request rather than baked in at startup).
+ */
+export function initClientWithAuth(auth: BoondAuthProvider, baseUrl?: string): void {
+  config = {
+    baseUrl: baseUrl ?? envOrUndefined("BOOND_BASE_URL") ?? DEFAULT_BASE_URL,
+    auth,
+  };
+}
+
+/** Test helper — reset the cached config so the next call re-initialises. */
+export function resetClientForTests(): void {
+  config = null;
 }
 
 function getConfig(): BoondConfig {
@@ -302,7 +346,7 @@ function hintForStatus(status: number): string {
     case 400:
       return "Check the request body or query parameters — likely a malformed field.";
     case 401:
-      return "Authentication failed. Verify BOOND_USER_TOKEN + BOOND_CLIENT_TOKEN + BOOND_CLIENT_KEY (or BOOND_API_TOKEN, or BOOND_USER + BOOND_PASSWORD).";
+      return "Authentication failed. Verify BOOND_USER_TOKEN + BOOND_CLIENT_TOKEN + BOOND_CLIENT_KEY (or BOOND_API_TOKEN, or BOOND_USER + BOOND_PASSWORD). On HTTP transport, the OAuth access token may have expired — re-run boondmanager-mcp-oauth-login.";
     case 403:
       return "Authenticated, but the user lacks permission for this endpoint or scope.";
     case 404:
@@ -386,7 +430,7 @@ export async function apiRequest(
   body?: unknown,
   queryParams?: Record<string, QueryValue>
 ): Promise<JsonApiResponse> {
-  const { baseUrl, authHeaderName, authHeaderValue } = getConfig();
+  const { baseUrl, auth } = getConfig();
 
   const url = new URL(`${baseUrl}${path}`);
 
@@ -407,12 +451,6 @@ export async function apiRequest(
     }
   }
 
-  const headers: Record<string, string> = {
-    [authHeaderName]: authHeaderValue,
-    Accept: "application/json",
-    "Content-Type": "application/json",
-  };
-
   const timeoutMs = resolveTimeoutMs();
   const retry = resolveRetryConfig();
   const totalAttempts = retry.maxRetries + 1;
@@ -430,6 +468,16 @@ export async function apiRequest(
     // rate budget — this is what actually protects us from feedback loops
     // (transient 5xx → retry → transient 5xx → …) saturating the API.
     if (limiter) await limiter.acquire();
+
+    // Resolve the auth header per-attempt so OAuth2 refreshes are picked
+    // up between retries (the access token may have expired since the
+    // previous attempt).
+    const authHeader = await auth();
+    const headers: Record<string, string> = {
+      [authHeader.name]: authHeader.value,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
 
     const fetchOptions: RequestInit = {
       method,

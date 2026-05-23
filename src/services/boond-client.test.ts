@@ -16,7 +16,11 @@ import {
   computeBackoffMs,
   resolveRateLimitConfig,
   resetRateLimiterForTests,
+  initClientWithAuth,
+  resetClientForTests,
+  oauthContextAuth,
 } from "./boond-client.js";
+import { oauthContext } from "./oauth.js";
 import {
   CHARACTER_LIMIT,
   DEFAULT_HTTP_TIMEOUT_MS,
@@ -1073,5 +1077,134 @@ describe("apiRequest rate limiting", () => {
     const after = vi.mocked(fetchMock).mock.calls.length;
 
     expect(after - before).toBe(5);
+  });
+});
+
+describe("initClientWithAuth (dynamic auth provider)", () => {
+  // Used by the HTTP transport to plug in OAuth — the access token is
+  // resolved per request so it can refresh transparently between calls.
+  const successResponse = () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers({ "content-length": "10" }),
+    json: () => Promise.resolve({ data: [] }),
+  });
+
+  beforeEach(() => {
+    delete process.env.BOOND_API_TOKEN;
+    delete process.env.BOOND_USER;
+    delete process.env.BOOND_PASSWORD;
+    delete process.env.BOOND_USER_TOKEN;
+    delete process.env.BOOND_CLIENT_TOKEN;
+    delete process.env.BOOND_CLIENT_KEY;
+    process.env.BOOND_HTTP_MAX_RETRIES = "0";
+    process.env.BOOND_HTTP_RATE_LIMIT_RPS = "0";
+    resetRateLimiterForTests();
+    resetClientForTests();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.BOOND_HTTP_MAX_RETRIES;
+    delete process.env.BOOND_HTTP_RATE_LIMIT_RPS;
+    resetRateLimiterForTests();
+    resetClientForTests();
+  });
+
+  it("sends the provider-supplied header on each request", async () => {
+    initClientWithAuth(async () => ({ name: "Authorization", value: "Bearer AT-1" }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(successResponse()));
+
+    await apiRequest("/application/current-user");
+    const options = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+    const headers = options.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer AT-1");
+    expect(headers["X-Jwt-Client-Boondmanager"]).toBeUndefined();
+  });
+
+  it("re-invokes the provider on every request so the token can rotate", async () => {
+    let n = 0;
+    initClientWithAuth(async () => ({ name: "Authorization", value: `Bearer AT-${++n}` }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(successResponse()));
+
+    await apiRequest("/application/current-user");
+    await apiRequest("/application/current-user");
+    const headersFirst = (vi.mocked(fetch).mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    const headersSecond = (vi.mocked(fetch).mock.calls[1][1] as RequestInit).headers as Record<string, string>;
+    expect(headersFirst.Authorization).toBe("Bearer AT-1");
+    expect(headersSecond.Authorization).toBe("Bearer AT-2");
+  });
+
+  it("respects a custom baseUrl override", async () => {
+    initClientWithAuth(async () => ({ name: "Authorization", value: "Bearer X" }), "https://example.test/api");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(successResponse()));
+
+    await apiRequest("/application/current-user");
+    const url = vi.mocked(fetch).mock.calls[0][0] as string;
+    expect(url).toBe("https://example.test/api/application/current-user");
+  });
+});
+
+describe("oauthContextAuth", () => {
+  // Bridge between the HTTP transport (which fills the AsyncLocalStorage
+  // context) and the boond-client (which forwards the Bearer to Boond).
+  const successResponse = () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers({ "content-length": "10" }),
+    json: () => Promise.resolve({ data: [] }),
+  });
+
+  beforeEach(() => {
+    process.env.BOOND_HTTP_MAX_RETRIES = "0";
+    process.env.BOOND_HTTP_RATE_LIMIT_RPS = "0";
+    resetRateLimiterForTests();
+    resetClientForTests();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.BOOND_HTTP_MAX_RETRIES;
+    delete process.env.BOOND_HTTP_RATE_LIMIT_RPS;
+    resetRateLimiterForTests();
+    resetClientForTests();
+  });
+
+  it("forwards the per-request access token from AsyncLocalStorage as a Bearer", async () => {
+    initClientWithAuth(oauthContextAuth);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(successResponse()));
+
+    await oauthContext.run({ accessToken: "user-AT" }, async () => {
+      await apiRequest("/application/current-user");
+    });
+    const options = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+    const headers = options.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer user-AT");
+  });
+
+  it("uses a different Bearer per concurrent request (multi-tenant isolation)", async () => {
+    initClientWithAuth(oauthContextAuth);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(successResponse()));
+
+    await Promise.all([
+      oauthContext.run({ accessToken: "tenant-A" }, async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        await apiRequest("/application/current-user");
+      }),
+      oauthContext.run({ accessToken: "tenant-B" }, async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        await apiRequest("/application/current-user");
+      }),
+    ]);
+    const tokens = vi
+      .mocked(fetch)
+      .mock.calls.map((c) => ((c[1] as RequestInit).headers as Record<string, string>).Authorization);
+    expect(tokens.sort()).toEqual(["Bearer tenant-A", "Bearer tenant-B"]);
+  });
+
+  it("throws a clear error when called outside a request context", async () => {
+    initClientWithAuth(oauthContextAuth);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(successResponse()));
+    await expect(apiRequest("/application/current-user")).rejects.toThrow(/Bearer/);
   });
 });

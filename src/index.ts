@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { initClient } from "./services/boond-client.js";
+import { initClient, initClientWithAuth, oauthContextAuth } from "./services/boond-client.js";
 import { createMcpServer, REGISTERED_DOMAINS } from "./server.js";
 import { resolveHttpOptions, startHttpTransport } from "./transports/http.js";
 
@@ -13,21 +13,21 @@ function resolveTransport(): TransportKind {
 }
 
 async function main(): Promise<void> {
-  try {
-    initClient();
-  } catch (error) {
-    console.error("⚠️  Configuration warning:", (error as Error).message);
-    console.error("The server will start but API calls will fail without proper credentials.");
-  }
-
   const kind = resolveTransport();
 
   if (kind === "http") {
+    // HTTP transport: OAuth2 only. The MCP server is a *protected resource*
+    // — it does not hold any OAuth client secrets and does not store tokens.
+    // Each MCP request carries its own `Authorization: Bearer <token>`,
+    // which the transport pushes into an AsyncLocalStorage context that the
+    // boond-client reads to call BoondManager on behalf of the user.
+    initClientWithAuth(oauthContextAuth);
     const options = resolveHttpOptions();
     const handle = await startHttpTransport(createMcpServer, options);
     console.error("🚀 BoondManager MCP Server running (streamable HTTP transport)");
     console.error(`📡 Endpoint: http://${handle.address.host}:${handle.address.port}${handle.address.path}`);
-    console.error(`🔑 Mode: ${options.stateless ? "stateless" : "stateful"}${options.bearerToken ? " (bearer auth)" : ""}`);
+    console.error(`🔑 Mode: ${options.stateless ? "stateless" : "stateful"}`);
+    console.error("🔐 Boond auth: OAuth2 (per-request Bearer from MCP client)");
     console.error(`📦 Domains: ${REGISTERED_DOMAINS.join(", ")}`);
 
     const shutdown = async (signal: string): Promise<void> => {
@@ -40,6 +40,14 @@ async function main(): Promise<void> {
     return;
   }
 
+  // stdio path: existing JWT / BasicAuth env vars (unchanged).
+  try {
+    initClient();
+  } catch (error) {
+    console.error("⚠️  Configuration warning:", (error as Error).message);
+    console.error("The server will start but API calls will fail without proper credentials.");
+  }
+
   const server = createMcpServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -48,6 +56,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error("Fatal error:", error);
+  console.error("Fatal error:", error instanceof Error ? error.message : error);
   process.exit(1);
 });

@@ -4,6 +4,20 @@
 # an MCP gateway (LobeChat, custom MCP host, etc.). For stdio usage, prefer
 # `npx boondmanager-mcp-server` directly on the host — Docker's stdio mapping
 # is awkward and you don't gain anything by containerising it.
+#
+# Authentication model (HTTP transport): the MCP server is an OAuth2
+# *protected resource*. It holds **no secrets**: no client_secret, no
+# refresh token, no token store. Each MCP request from the client must
+# carry `Authorization: Bearer <boond_access_token>`; the server forwards
+# the token verbatim to BoondManager. The client (Claude Desktop, Claude
+# Code, MCP gateway, …) performs the OAuth dance against BoondManager
+# directly and refreshes its own tokens.
+#
+# The server publishes RFC 9728 protected-resource metadata at
+# `/.well-known/oauth-protected-resource` so MCP clients auto-discover
+# the BoondManager authorization server.
+#
+# See docs/oauth.md for the full flow.
 
 # ---- builder ----
 FROM node:22-alpine AS builder
@@ -27,7 +41,7 @@ WORKDIR /app
 
 # OCI image annotations — make the image discoverable in registries.
 LABEL org.opencontainers.image.title="boondmanager-mcp-server" \
-      org.opencontainers.image.description="MCP server for the BoondManager API (HTTP gateway mode)" \
+      org.opencontainers.image.description="MCP server for the BoondManager API (HTTP gateway mode, OAuth2 protected resource)" \
       org.opencontainers.image.source="https://github.com/fauguste/boondmanager-mcp-server" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.vendor="Silamir"
@@ -50,10 +64,10 @@ ENV NODE_ENV=production \
 
 EXPOSE 3000
 
-# Lightweight liveness check — confirms the HTTP listener is up. We use
-# Node's bundled fetch to avoid pulling curl/wget into the image. A 4xx
-# (e.g. 405 if the path is POST-only) still proves the listener is alive.
+# Lightweight liveness check — confirms the HTTP listener is up. The
+# unauthenticated discovery endpoint is the cheapest probe: always 200,
+# doesn't need credentials, doesn't open a session.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD node -e "fetch('http://127.0.0.1:'+process.env.MCP_HTTP_PORT+process.env.MCP_HTTP_PATH).then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"
+    CMD node -e "fetch('http://127.0.0.1:'+process.env.MCP_HTTP_PORT+'/.well-known/oauth-protected-resource').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["node", "dist/index.js"]
