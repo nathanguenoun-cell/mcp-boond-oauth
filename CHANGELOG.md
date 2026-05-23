@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.0.0] - 2026-05-23
+
+> **Promotion de [`2.0.0-alpha`](#200-alpha---2026-05-21) en stable** apres smoke test reel : conteneur Docker pull/run depuis Docker Hub, discovery `/.well-known/oauth-protected-resource` + 401 challenge `WWW-Authenticate` verifies, rejet du scheme non-Bearer confirme, handshake MCP `initialize` traverse end-to-end (serverInfo `2.0.0-alpha`, protocol `2025-06-18`).
+
+Aucun changement de code par rapport a 2.0.0-alpha. Seule difference : README mis a jour (badges Docker Hub + GHCR, section *Docker (image officielle)* qui liste les deux registres miroirs avec leurs liens, note sur le scoping des tags de prerelease). Pour le contenu fonctionnel de la 2.x, voir l'entree 2.0.0-alpha ci-dessous.
+
+### Migration depuis 1.x
+
+- **Transport stdio** : aucune action. JWT / BasicAuth via env vars (`BOOND_USER_TOKEN` + `BOOND_CLIENT_TOKEN` + `BOOND_CLIENT_KEY`, ou `BOOND_API_TOKEN`, ou `BOOND_USER` + `BOOND_PASSWORD`) fonctionnent comme avant.
+- **Transport HTTP** : breaking. Si tu utilisais `MCP_HTTP_BEARER_TOKEN` comme shared secret transport-level, supprime-le — il a disparu (il est remplace par l'OAuth Bearer per-user porte par chaque requete). Si tu publiais des credentials Boond cote serveur (env vars JWT/BasicAuth sur le conteneur HTTP), supprime-les egalement — le serveur n'en a plus besoin. A la place : enregistre une App OAuth2 dans BoondManager (*Administration -> Apps -> Security*) et configure ton client MCP pour qu'il fasse la danse OAuth contre Boond, le serveur ne fait que forwarder le Bearer. Procedure complete dans `docs/oauth.md`.
+
 ## [2.0.0-alpha] - 2026-05-21
 
 > **Breaking change majeur** : le transport HTTP passe d'une auth shared-secret + JWT cote serveur a une auth OAuth2 *protected resource* (le Bearer token est porte par chaque requete MCP). Pas de migration possible — c'est une nouvelle architecture, d'ou le bump majeur. Le transport stdio reste inchange. Voir `docs/oauth.md` pour la procedure complete.
