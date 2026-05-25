@@ -1,0 +1,30 @@
+name: Docker Hub Description Sync (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Docker Hub repository (e.g., fauguste/boondmanager-mcp-server)"
+        required: true
+        default: "fauguste/boondmanager-mcp-server"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync Docker Hub description
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Sync Docker Hub description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ inputs.repository }}
+          short-description: ${{ github.event.repository.description }}
+          readme-filepath: ./README-docker.md
+          enable-url-completion: true
