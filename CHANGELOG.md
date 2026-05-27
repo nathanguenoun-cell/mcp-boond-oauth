@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.1.0] - 2026-05-27
+
+Mécanisme de notification de mise à jour pour les installations `.mcpb` dans Claude Desktop (et tous les autres canaux : stdio CLI, transport HTTP, conteneur Docker).
+
+### Added
+
+- **Notification de version au démarrage** (`src/services/update-checker.ts`) : au boot, le serveur interroge `https://registry.npmjs.org/boondmanager-mcp-server/latest` (timeout 3s) et, si une release plus récente que la version locale existe, émet un log `warn` structuré (`event: "update_available"`, current, latest, url) via le logger pino central. Claude Desktop capture stderr dans son panneau Developer logs, où la notification est visible. L'utilisateur télécharge ensuite le nouveau `.mcpb` manuellement depuis GitHub Releases. Fire-and-forget : ne bloque jamais le boot, fail-silent sur erreur réseau / 4xx-5xx / JSON malformé / semver invalide. Actif sur les deux transports (stdio + HTTP).
+- **Opt-out** : `BOOND_DISABLE_UPDATE_CHECK=1` (ou `true` / `yes`) désactive entièrement le check. Pour les environnements air-gapped, CI, ou tout déploiement où l'appel sortant vers npm est indésirable.
+
+### Why
+
+MCPB 0.3 n'expose aucun champ `update_url` et l'auto-update natif de Claude Desktop ne s'applique qu'aux extensions du répertoire curaté Anthropic. Pour les `.mcpb` tiers distribués via GitHub Releases, la notification stderr est l'équivalent pratique le plus proche — l'utilisateur sait qu'une nouvelle version existe sans avoir à surveiller le repo.
+
 ## [2.0.1] - 2026-05-25
 
 Patch de publication : synchronisation automatique de la description Docker Hub.

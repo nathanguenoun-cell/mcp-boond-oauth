@@ -1,7 +1,11 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { initClient, initClientWithAuth, oauthContextAuth } from "./services/boond-client.js";
 import { createMcpServer, REGISTERED_DOMAINS } from "./server.js";
+import { runUpdateNotification } from "./services/update-checker.js";
 import { resolveHttpOptions, startHttpTransport } from "./transports/http.js";
 
 type TransportKind = "stdio" | "http";
@@ -10,6 +14,24 @@ function resolveTransport(): TransportKind {
   const raw = (process.env["MCP_TRANSPORT"] ?? "").toLowerCase().trim();
   if (raw === "http" || raw === "streamable-http" || raw === "streamablehttp") return "http";
   return "stdio";
+}
+
+function readLocalPackageMeta(): { name: string; version: string } | null {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(here, "..", "package.json"), "utf8");
+    const pkg = JSON.parse(raw) as { name?: unknown; version?: unknown };
+    if (typeof pkg.name !== "string" || typeof pkg.version !== "string") return null;
+    return { name: pkg.name, version: pkg.version };
+  } catch {
+    return null;
+  }
+}
+
+function scheduleUpdateCheck(): void {
+  const meta = readLocalPackageMeta();
+  if (!meta) return;
+  void runUpdateNotification({ currentVersion: meta.version, packageName: meta.name });
 }
 
 async function main(): Promise<void> {
@@ -37,6 +59,7 @@ async function main(): Promise<void> {
     };
     process.on("SIGINT", () => void shutdown("SIGINT"));
     process.on("SIGTERM", () => void shutdown("SIGTERM"));
+    scheduleUpdateCheck();
     return;
   }
 
@@ -53,6 +76,7 @@ async function main(): Promise<void> {
   await server.connect(transport);
   console.error("🚀 BoondManager MCP Server running (stdio transport)");
   console.error(`📦 Domains: ${REGISTERED_DOMAINS.join(", ")}`);
+  scheduleUpdateCheck();
 }
 
 main().catch((error) => {

@@ -388,6 +388,17 @@ extraction + discovery endpoint + 401 challenge), `src/services/boond-client.ts`
 - `BOOND_HTTP_RETRY_BASE_MS` / `BOOND_HTTP_RETRY_MAX_MS` (optional, defaults `200` / `5000`) — full-jitter exponential backoff: `random(0, min(maxMs, baseMs * 2^attempt))`.
 - `BOOND_HTTP_RATE_LIMIT_RPS` / `BOOND_HTTP_RATE_LIMIT_BURST` (optional, defaults `10` / `20`) — client-side token bucket guarding the BoondManager API. Each attempt (including retries) consumes one token. Set RPS to `0` to disable. Implementation in `src/services/rate-limiter.ts`; tests can swap the bucket via the exported `resetRateLimiterForTests()`.
 
+## Update Notification
+
+The MCPB spec (`manifest_version: 0.3`) does **not** expose an `update_url` field, and Claude Desktop's auto-update mechanism only applies to extensions in Anthropic's curated directory. For third-party `.mcpb` installs, the closest practical equivalent is a startup notification: `src/services/update-checker.ts` queries `https://registry.npmjs.org/<pkg>/latest` (3 s timeout), parses the local `package.json` version, and — if a newer release exists — emits a structured `warn` log via the central pino logger (`event: "update_available"`). Claude Desktop captures stderr into its Developer log viewer, so the message is discoverable there; the user still downloads the new `.mcpb` manually from GitHub Releases.
+
+Behavior notes:
+- Fire-and-forget at startup in both stdio and HTTP transports — never blocks the server boot.
+- Fails silently on network errors, non-2xx responses, malformed bodies, or unparseable semver; the server keeps running normally.
+- Prerelease suffixes (`-rc.1`, `-beta`) are stripped before comparison (only the `X.Y.Z` core is compared).
+- Opt-out: set `BOOND_DISABLE_UPDATE_CHECK=1` (or `true` / `yes`) to skip the check entirely. Useful for air-gapped or CI environments. Not exposed in `manifest.json::user_config` — MCPB users are precisely the audience the notification targets.
+- Implementation deliberately uses only `package.json` (kept in the bundle — not listed in `.mcpbignore`) plus the npm registry; no GitHub API call, no rate-limit concerns.
+
 ## CI/CD
 
 - **CI** (`.github/workflows/ci.yml`): Runs on push/PR to main. Matrix: Node 20 + 22. Steps: install, lint, typecheck, test:coverage, build, **MCPB validate** (Node 22 only), **TOOLS.md drift check** (Node 22 only), **version consistency** between `package.json` / `manifest.json` / `server.json`, coverage upload.
