@@ -164,6 +164,14 @@ async function readUrlEncodedBody(req: IncomingMessage): Promise<Record<string, 
   return result;
 }
 
+// CORS headers required for browser-based MCP clients (e.g. Dust).
+// Applied to all public OAuth and discovery endpoints.
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id",
+};
+
 function writeJson(res: ServerResponse, status: number, body: unknown, extraHeaders?: Record<string, string>): void {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
@@ -231,6 +239,15 @@ export async function startHttpTransport(
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       const { pathname } = url;
 
+      // CORS preflight — browser clients (Dust) send OPTIONS before every
+      // cross-origin request. Respond immediately with the allowed headers.
+      if (req.method === "OPTIONS") {
+        res.statusCode = 204;
+        for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v);
+        res.end();
+        return;
+      }
+
       // ── RFC 9728: OAuth2 protected-resource metadata ──────────────────────
       // The MCP server is the authorization server proxy — authorization_servers
       // points to itself (baseUrl), not to BoondManager directly.
@@ -244,6 +261,7 @@ export async function startHttpTransport(
           authorizationServers: [baseUrl],
         });
         res.statusCode = 200;
+        for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v);
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Cache-Control", "public, max-age=3600");
         res.end(JSON.stringify(doc));
@@ -265,7 +283,7 @@ export async function startHttpTransport(
             code_challenge_methods_supported: ["S256", "plain"],
             token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
           },
-          { "Cache-Control": "public, max-age=3600" }
+          { ...CORS_HEADERS, "Cache-Control": "public, max-age=3600" }
         );
         return;
       }
@@ -280,16 +298,21 @@ export async function startHttpTransport(
         const clientSecret = generateToken();
         registerClient({ clientId, clientSecret, redirectUris, clientName });
 
-        writeJson(res, 201, {
-          client_id: clientId,
-          client_secret: clientSecret,
-          redirect_uris: redirectUris,
-          client_name: clientName,
-          client_id_issued_at: Math.floor(Date.now() / 1000),
-          grant_types: ["authorization_code"],
-          response_types: ["code"],
-          token_endpoint_auth_method: "client_secret_post",
-        });
+        writeJson(
+          res,
+          201,
+          {
+            client_id: clientId,
+            client_secret: clientSecret,
+            redirect_uris: redirectUris,
+            client_name: clientName,
+            client_id_issued_at: Math.floor(Date.now() / 1000),
+            grant_types: ["authorization_code"],
+            response_types: ["code"],
+            token_endpoint_auth_method: "client_secret_post",
+          },
+          CORS_HEADERS
+        );
         return;
       }
 
@@ -409,31 +432,36 @@ export async function startHttpTransport(
         const { grant_type, code, client_id, client_secret, code_verifier } = body;
 
         if (grant_type !== "authorization_code") {
-          writeJson(res, 400, { error: "unsupported_grant_type" });
+          writeJson(res, 400, { error: "unsupported_grant_type" }, CORS_HEADERS);
           return;
         }
 
         const storedCode = getAuthCode(code ?? "");
         if (!storedCode) {
-          writeJson(res, 400, { error: "invalid_grant" });
+          writeJson(res, 400, { error: "invalid_grant" }, CORS_HEADERS);
           return;
         }
         deleteAuthCode(code ?? "");
 
         if (storedCode.clientId !== client_id) {
-          writeJson(res, 401, { error: "invalid_client" });
+          writeJson(res, 401, { error: "invalid_client" }, CORS_HEADERS);
           return;
         }
 
         const registeredClient = getRegisteredClient(client_id ?? "");
         if (!registeredClient || registeredClient.clientSecret !== client_secret) {
-          writeJson(res, 401, { error: "invalid_client" });
+          writeJson(res, 401, { error: "invalid_client" }, CORS_HEADERS);
           return;
         }
 
         if (storedCode.codeChallenge) {
           if (!code_verifier || !verifyPKCE(code_verifier, storedCode.codeChallenge, storedCode.codeChallengeMethod)) {
-            writeJson(res, 400, { error: "invalid_grant", error_description: "PKCE verification failed" });
+            writeJson(
+              res,
+              400,
+              { error: "invalid_grant", error_description: "PKCE verification failed" },
+              CORS_HEADERS
+            );
             return;
           }
         }
@@ -445,11 +473,16 @@ export async function startHttpTransport(
           createdAt: Date.now(),
         });
 
-        writeJson(res, 200, {
-          access_token: accessToken,
-          token_type: "Bearer",
-          expires_in: 3600,
-        });
+        writeJson(
+          res,
+          200,
+          {
+            access_token: accessToken,
+            token_type: "Bearer",
+            expires_in: 3600,
+          },
+          CORS_HEADERS
+        );
         return;
       }
 
