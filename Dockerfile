@@ -53,16 +53,16 @@ COPY --chown=node:node --from=builder /app/node_modules ./node_modules
 COPY --chown=node:node --from=builder /app/dist ./dist
 COPY --chown=node:node --from=builder /app/package.json ./package.json
 
-# HTTP transport defaults. MCP_HTTP_HOST=0.0.0.0 binds to all interfaces so
-# Railway (and Docker) can route traffic in. PORT is Railway's standard variable;
-# MCP_HTTP_PORT is the legacy override — resolveHttpOptions() reads both.
+# MCP_HTTP_HOST=0.0.0.0 binds to all interfaces (required in Docker/Railway).
+# MCP_HTTP_PORT is intentionally NOT set here so Railway's dynamically injected
+# PORT variable is used. resolveHttpOptions() reads MCP_HTTP_PORT first, then
+# PORT, then falls back to 3000 — omitting MCP_HTTP_PORT lets Railway win.
 ENV NODE_ENV=production \
     MCP_TRANSPORT=http \
     MCP_HTTP_HOST=0.0.0.0 \
-    MCP_HTTP_PORT=3000 \
     MCP_HTTP_PATH=/mcp
 # Required at runtime (set via Railway env vars, not baked into the image):
-#   BASE_URL / MCP_HTTP_PUBLIC_URL  — public URL of this deployment
+#   MCP_HTTP_PUBLIC_URL             — public URL of this deployment (e.g. https://<project>.up.railway.app/mcp)
 #   BOOND_OAUTH_CLIENT_ID           — BoondManager OAuth app client_id
 #   BOOND_OAUTH_CLIENT_SECRET       — BoondManager OAuth app client_secret
 #   BOOND_OAUTH_AUTH_URL            — BoondManager authorization endpoint
@@ -70,10 +70,9 @@ ENV NODE_ENV=production \
 
 EXPOSE 3000
 
-# Lightweight liveness check — confirms the HTTP listener is up. The
-# unauthenticated discovery endpoint is the cheapest probe: always 200,
-# doesn't need credentials, doesn't open a session.
+# Healthcheck reads the effective port from env (PORT injected by Railway,
+# or MCP_HTTP_PORT if set explicitly, falling back to 3000).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD node -e "fetch('http://127.0.0.1:'+process.env.MCP_HTTP_PORT+'/.well-known/oauth-protected-resource').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+    CMD node -e "const p=process.env.MCP_HTTP_PORT??process.env.PORT??'3000';fetch('http://127.0.0.1:'+p+'/.well-known/oauth-protected-resource').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["node", "dist/index.js"]
