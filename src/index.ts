@@ -38,18 +38,18 @@ async function main(): Promise<void> {
   const kind = resolveTransport();
 
   if (kind === "http") {
-    // HTTP transport: OAuth2 only. The MCP server is a *protected resource*
-    // — it does not hold any OAuth client secrets and does not store tokens.
-    // Each MCP request carries its own `Authorization: Bearer <token>`,
-    // which the transport pushes into an AsyncLocalStorage context that the
-    // boond-client reads to call BoondManager on behalf of the user.
+    // HTTP transport: OAuth2 proxy mode.
+    // The MCP server acts as an Authorization Server proxy between Dust/MCP
+    // clients and BoondManager. It brokers the OAuth dance (Dynamic Client
+    // Registration, /authorize, /token) and maps Dust tokens to BoondManager
+    // tokens per user. No client secrets are stored past the OAuth flow.
     initClientWithAuth(oauthContextAuth);
     const options = resolveHttpOptions();
     const handle = await startHttpTransport(createMcpServer, options);
-    console.error("🚀 BoondManager MCP Server running (streamable HTTP transport)");
-    console.error(`📡 Endpoint: http://${handle.address.host}:${handle.address.port}${handle.address.path}`);
-    console.error(`🔑 Mode: ${options.stateless ? "stateless" : "stateful"}`);
-    console.error("🔐 Boond auth: OAuth2 (per-request Bearer from MCP client)");
+    console.error("🚀 BoondManager MCP Server running (streamable HTTP + OAuth proxy)");
+    console.error(`📡 MCP endpoint : http://${handle.address.host}:${handle.address.port}${handle.address.path}`);
+    console.error(`📡 Root endpoint: http://${handle.address.host}:${handle.address.port}/`);
+    console.error("🔐 Auth: OAuth2 proxy (Dust Connect button supported)");
     console.error(`📦 Domains: ${REGISTERED_DOMAINS.join(", ")}`);
 
     const shutdown = async (signal: string): Promise<void> => {

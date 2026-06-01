@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { request as httpRequest } from "node:http";
 import { resolveAllowedHosts, resolveHttpOptions, startHttpTransport, type HttpServerHandle } from "./http.js";
+import { seedTokenPairForTesting } from "../services/oauth-state.js";
 import { createMcpServer } from "../server.js";
 
 /**
@@ -54,12 +55,11 @@ const ENV_KEYS = [
   "MCP_HTTP_SESSION_SWEEP_INTERVAL_MS",
   "MCP_HTTP_ALLOWED_HOSTS",
   "MCP_HTTP_PUBLIC_URL",
-  "BOOND_OAUTH_AUTHORIZATION_SERVER",
-  "BOOND_OAUTH_SCOPES",
 ];
 
-/** Shorthand for an authenticated MCP request body (OAuth Bearer required). */
-const AUTH_HEADER = { Authorization: "Bearer test-access-token" };
+// Pre-seeded token pair used throughout integration tests.
+const TEST_OUR_TOKEN = "test-our-token-for-http-tests";
+const TEST_BOOND_TOKEN = "test-boond-token-for-http-tests";
 
 function clearEnv(): void {
   for (const key of ENV_KEYS) delete process.env[key];
@@ -162,6 +162,12 @@ describe("resolveAllowedHosts", () => {
 describe("startHttpTransport (integration)", () => {
   let handle: HttpServerHandle | undefined;
 
+  beforeEach(() => {
+    // Pre-seed the token pair so integration tests can use it without going
+    // through the OAuth dance.
+    seedTokenPairForTesting(TEST_OUR_TOKEN, TEST_BOOND_TOKEN);
+  });
+
   afterEach(async () => {
     if (handle) await handle.close();
     handle = undefined;
@@ -187,10 +193,9 @@ describe("startHttpTransport (integration)", () => {
       stateless: true,
       enableJsonResponse: true,
     });
-    // GET on the MCP endpoint still needs to be authenticated — the 401
-    // challenge fires before stateless-vs-stateful routing.
+    // Method check fires before token validation — GET always yields 405.
     const res = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`, {
-      headers: AUTH_HEADER,
+      headers: { Authorization: `Bearer ${TEST_OUR_TOKEN}` },
     });
     expect(res.status).toBe(405);
   });
@@ -211,7 +216,7 @@ describe("startHttpTransport (integration)", () => {
     const challenge = res.headers.get("www-authenticate") ?? "";
     expect(challenge).toMatch(/^Bearer /);
     expect(challenge).toContain("resource_metadata=");
-    expect(challenge).toContain("/.well-known/oauth-protected-resource/mcp");
+    expect(challenge).toContain("/.well-known/oauth-protected-resource");
   });
 
   it("rejects requests with a non-Bearer Authorization scheme", async () => {
@@ -225,6 +230,22 @@ describe("startHttpTransport (integration)", () => {
     const res = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`, {
       method: "POST",
       headers: { Authorization: "Basic dGVzdDp0ZXN0" },
+      body: "{}",
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 401 for an unknown Bearer token (not in our token map)", async () => {
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34575,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+    });
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`, {
+      method: "POST",
+      headers: { Authorization: "Bearer unknown-token-not-in-map" },
       body: "{}",
     });
     expect(res.status).toBe(401);
@@ -244,7 +265,8 @@ describe("startHttpTransport (integration)", () => {
     expect(res.headers.get("content-type")).toContain("application/json");
     const doc = (await res.json()) as Record<string, unknown>;
     expect(doc["resource"]).toBe("https://mcp.example.com/mcp");
-    expect(doc["authorization_servers"]).toEqual(["https://ui.boondmanager.com"]);
+    // In proxy mode the authorization server is the MCP server itself.
+    expect(doc["authorization_servers"]).toEqual(["https://mcp.example.com"]);
     expect(doc["bearer_methods_supported"]).toEqual(["header"]);
   });
 
@@ -262,66 +284,46 @@ describe("startHttpTransport (integration)", () => {
     expect(typeof doc["resource"]).toBe("string");
   });
 
-  it("honours BOOND_OAUTH_AUTHORIZATION_SERVER + BOOND_OAUTH_SCOPES in the discovery metadata", async () => {
-    process.env["BOOND_OAUTH_AUTHORIZATION_SERVER"] = "https://custom.boondmanager.com";
-    process.env["BOOND_OAUTH_SCOPES"] = "candidates,resources";
+  it("publishes RFC 8414 authorization-server metadata at /.well-known/oauth-authorization-server", async () => {
     handle = await startHttpTransport(createMcpServer, {
       host: "127.0.0.1",
       port: 34582,
       path: "/mcp",
       stateless: true,
       enableJsonResponse: true,
+      publicUrl: "https://mcp.example.com/mcp",
     });
-    const res = await fetch(`http://127.0.0.1:${handle.address.port}/.well-known/oauth-protected-resource`);
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/.well-known/oauth-authorization-server`);
+    expect(res.status).toBe(200);
     const doc = (await res.json()) as Record<string, unknown>;
-    expect(doc["authorization_servers"]).toEqual(["https://custom.boondmanager.com"]);
-    expect(doc["scopes_supported"]).toEqual(["candidates", "resources"]);
+    expect(doc["issuer"]).toBe("https://mcp.example.com");
+    expect(doc["authorization_endpoint"]).toBe("https://mcp.example.com/authorize");
+    expect(doc["token_endpoint"]).toBe("https://mcp.example.com/token");
+    expect(doc["registration_endpoint"]).toBe("https://mcp.example.com/register");
+    expect((doc["code_challenge_methods_supported"] as string[]).includes("S256")).toBe(true);
   });
 
-  it("reaps idle stateful sessions on sweep", async () => {
+  it("registers a new OAuth client via POST /register", async () => {
     handle = await startHttpTransport(createMcpServer, {
       host: "127.0.0.1",
-      port: 34571,
+      port: 34583,
       path: "/mcp",
-      stateless: false,
+      stateless: true,
       enableJsonResponse: true,
-      sessionTtlMs: 50,
-      // Big sweep interval so the periodic timer never fires during this
-      // test — we drive the sweep explicitly via the handle.
-      sessionSweepIntervalMs: 60_000,
     });
-
-    const initRes = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`, {
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/register`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json, text/event-stream",
-        ...AUTH_HEADER,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-06-18",
-          capabilities: {},
-          clientInfo: { name: "vitest", version: "1.0.0" },
-        },
+        client_name: "Dust test client",
+        redirect_uris: ["https://dust.tt/oauth/callback"],
       }),
     });
-    expect(initRes.status).toBe(200);
-    await initRes.text();
-
-    expect(handle.sessionCount()).toBe(1);
-
-    // A fresh session should not be reaped — last activity is now-ish.
-    expect(await handle.sweepIdleSessions()).toBe(0);
-    expect(handle.sessionCount()).toBe(1);
-
-    // Wait past the TTL, then a sweep should reap the idle session.
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(await handle.sweepIdleSessions()).toBe(1);
-    expect(handle.sessionCount()).toBe(0);
+    expect(res.status).toBe(201);
+    const doc = (await res.json()) as Record<string, unknown>;
+    expect(typeof doc["client_id"]).toBe("string");
+    expect(typeof doc["client_secret"]).toBe("string");
+    expect(doc["grant_types"]).toEqual(["authorization_code"]);
   });
 
   it("rejects requests with a Host header outside the allow-list", async () => {
@@ -361,11 +363,11 @@ describe("startHttpTransport (integration)", () => {
           clientInfo: { name: "vitest", version: "1.0.0" },
         },
       }),
-      { Accept: "application/json, text/event-stream", ...AUTH_HEADER }
+      { Accept: "application/json, text/event-stream", Authorization: `Bearer ${TEST_OUR_TOKEN}` }
     );
     expect(okRes.status).toBe(200);
 
-    const koRes = await postWithHost(handle.address.port, "/mcp", "other.example.com", "{}", AUTH_HEADER);
+    const koRes = await postWithHost(handle.address.port, "/mcp", "other.example.com", "{}");
     expect(koRes.status).toBe(403);
   });
 
@@ -392,7 +394,7 @@ describe("startHttpTransport (integration)", () => {
           clientInfo: { name: "vitest", version: "1.0.0" },
         },
       }),
-      { Accept: "application/json, text/event-stream", ...AUTH_HEADER }
+      { Accept: "application/json, text/event-stream", Authorization: `Bearer ${TEST_OUR_TOKEN}` }
     );
     expect(res.status).toBe(200);
   });
@@ -410,7 +412,7 @@ describe("startHttpTransport (integration)", () => {
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
-        ...AUTH_HEADER,
+        Authorization: `Bearer ${TEST_OUR_TOKEN}`,
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -428,5 +430,21 @@ describe("startHttpTransport (integration)", () => {
       result?: { serverInfo?: { name?: string } };
     };
     expect(json.result?.serverInfo?.name).toBe("boondmanager-mcp-server");
+  });
+
+  it("serves the MCP endpoint at / as well as /mcp", async () => {
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34576,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+    });
+    // POST to root without a token → 401 (endpoint is live)
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/`, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(res.status).toBe(401);
   });
 });

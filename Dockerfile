@@ -53,14 +53,20 @@ COPY --chown=node:node --from=builder /app/node_modules ./node_modules
 COPY --chown=node:node --from=builder /app/dist ./dist
 COPY --chown=node:node --from=builder /app/package.json ./package.json
 
-# HTTP transport defaults — override at run time as needed.
-# MCP_HTTP_HOST=0.0.0.0 is required inside the container so the port is
-# reachable from the host (the server defaults to 127.0.0.1 for stdio safety).
+# HTTP transport defaults. MCP_HTTP_HOST=0.0.0.0 binds to all interfaces so
+# Railway (and Docker) can route traffic in. PORT is Railway's standard variable;
+# MCP_HTTP_PORT is the legacy override — resolveHttpOptions() reads both.
 ENV NODE_ENV=production \
     MCP_TRANSPORT=http \
     MCP_HTTP_HOST=0.0.0.0 \
     MCP_HTTP_PORT=3000 \
     MCP_HTTP_PATH=/mcp
+# Required at runtime (set via Railway env vars, not baked into the image):
+#   BASE_URL / MCP_HTTP_PUBLIC_URL  — public URL of this deployment
+#   BOOND_OAUTH_CLIENT_ID           — BoondManager OAuth app client_id
+#   BOOND_OAUTH_CLIENT_SECRET       — BoondManager OAuth app client_secret
+#   BOOND_OAUTH_AUTH_URL            — BoondManager authorization endpoint
+#   BOOND_OAUTH_TOKEN_URL           — BoondManager token endpoint
 
 EXPOSE 3000
 

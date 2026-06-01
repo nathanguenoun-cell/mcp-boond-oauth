@@ -1,16 +1,22 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { logger, generateCorrelationId } from "../services/logger.js";
+import { buildProtectedResourceMetadata, extractBearerToken, oauthContext } from "../services/oauth.js";
 import {
-  buildProtectedResourceMetadata,
-  extractBearerToken,
-  oauthContext,
-  resolveAdvertisedScopes,
-  resolveAuthorizationServer,
-} from "../services/oauth.js";
+  deleteAuthCode,
+  deletePendingAuth,
+  generateToken,
+  getAccessToken,
+  getAuthCode,
+  getPendingAuth,
+  getRegisteredClient,
+  registerClient,
+  storeAccessToken,
+  storeAuthCode,
+  storePendingAuth,
+  verifyPKCE,
+} from "../services/oauth-state.js";
 
 export interface HttpTransportOptions {
   host: string;
@@ -18,23 +24,13 @@ export interface HttpTransportOptions {
   path: string;
   stateless: boolean;
   enableJsonResponse: boolean;
-  /** Idle timeout for stateful sessions, in ms. Defaults to 30 min. */
   sessionTtlMs?: number;
-  /** How often to sweep idle sessions, in ms. Defaults to 5 min. */
   sessionSweepIntervalMs?: number;
-  /**
-   * Allow-list of Host header hostnames (port-agnostic) for DNS rebinding
-   * protection. Empty array = validation disabled. Use `["*"]` to opt out
-   * explicitly. When undefined, a localhost default is applied if bound
-   * to a loopback interface.
-   */
   allowedHosts?: string[];
   /**
-   * Public URL clients use to reach this MCP endpoint — used as the
-   * `resource` field of the protected-resource metadata and in the
-   * `WWW-Authenticate` challenge. Defaults to `http://{host}:{port}{path}`
-   * which is only correct for local / loopback deployments. Behind a
-   * reverse proxy, set `MCP_HTTP_PUBLIC_URL` explicitly.
+   * Public URL of the MCP endpoint — e.g. `https://my-app.up.railway.app/mcp`.
+   * Used as the `resource` field in OAuth discovery and as the base for deriving
+   * the issuer URL. Required in production; defaults to `http://host:port/path`.
    */
   publicUrl?: string;
 }
@@ -42,18 +38,12 @@ export interface HttpTransportOptions {
 export interface HttpServerHandle {
   close: () => Promise<void>;
   address: { host: string; port: number; path: string };
-  /** Current count of live stateful sessions (always 0 in stateless mode). */
+  /** Always 0 — stateful sessions are not used in this transport. */
   sessionCount: () => number;
-  /** Manually trigger an idle sweep; returns the number of sessions reaped. */
+  /** No-op — kept for interface compatibility. */
   sweepIdleSessions: () => Promise<number>;
 }
 
-// Defaults: a half-hour idle window matches typical MCP gateway behaviour, and
-// a 5-minute sweep keeps memory bounded without hammering the event loop.
-const DEFAULT_SESSION_TTL_MS = 30 * 60_000;
-const DEFAULT_SESSION_SWEEP_INTERVAL_MS = 5 * 60_000;
-
-// Loopback addresses that should default to the localhost host allow-list.
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const LOCALHOST_ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
 
@@ -81,12 +71,6 @@ function readAllowedHosts(): string[] | undefined {
   return parts;
 }
 
-/**
- * Resolves the effective Host header allow-list given user options and the
- * bound listen interface. Returns an empty array when validation is disabled
- * (either explicitly via `["*"]` or implicitly when bound to a non-loopback
- * interface without an explicit list).
- */
 export function resolveAllowedHosts(configured: string[] | undefined, host: string): string[] {
   if (configured && configured.length > 0) {
     if (configured.includes("*")) return [];
@@ -96,10 +80,6 @@ export function resolveAllowedHosts(configured: string[] | undefined, host: stri
   return [];
 }
 
-/**
- * Extracts the hostname (without port) from a Host header. Returns
- * `undefined` if the header is missing or malformed.
- */
 function extractHostname(hostHeader: string | string[] | undefined): string | undefined {
   if (!hostHeader) return undefined;
   const value = Array.isArray(hostHeader) ? hostHeader[0] : hostHeader;
@@ -112,7 +92,8 @@ function extractHostname(hostHeader: string | string[] | undefined): string | un
 }
 
 export function resolveHttpOptions(): HttpTransportOptions {
-  const portRaw = readEnv("MCP_HTTP_PORT");
+  // Railway sets PORT; MCP_HTTP_PORT is the per-project override.
+  const portRaw = readEnv("MCP_HTTP_PORT") ?? readEnv("PORT");
   const port = portRaw ? Number.parseInt(portRaw, 10) : 3000;
   if (!Number.isFinite(port) || port <= 0 || port > 65535) {
     throw new Error(`Invalid MCP_HTTP_PORT: ${portRaw}`);
@@ -127,19 +108,28 @@ export function resolveHttpOptions(): HttpTransportOptions {
     path: readEnv("MCP_HTTP_PATH") ?? "/mcp",
     stateless,
     enableJsonResponse,
-    sessionTtlMs: readPositiveInt("MCP_HTTP_SESSION_TTL_MS", DEFAULT_SESSION_TTL_MS),
-    sessionSweepIntervalMs: readPositiveInt("MCP_HTTP_SESSION_SWEEP_INTERVAL_MS", DEFAULT_SESSION_SWEEP_INTERVAL_MS),
+    sessionTtlMs: readPositiveInt("MCP_HTTP_SESSION_TTL_MS", 30 * 60_000),
+    sessionSweepIntervalMs: readPositiveInt("MCP_HTTP_SESSION_SWEEP_INTERVAL_MS", 5 * 60_000),
     allowedHosts: readAllowedHosts(),
     publicUrl: readEnv("MCP_HTTP_PUBLIC_URL"),
   };
 }
 
 /**
- * Build the canonical "resource" URL advertised in the OAuth2 protected
- * resource metadata and in the `WWW-Authenticate` challenge. Behind a
- * reverse proxy, the operator must set `MCP_HTTP_PUBLIC_URL` so clients
- * receive the externally-reachable URL, not the loopback default.
+ * Derive the base URL (scheme + host, no path) from a full endpoint URL.
+ * `https://my-app.up.railway.app/mcp` → `https://my-app.up.railway.app`
  */
+function resolveBaseUrl(options: HttpTransportOptions): string {
+  const source = options.publicUrl ?? `http://${options.host}:${options.port}${options.path}`;
+  try {
+    const u = new URL(source);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return source;
+  }
+}
+
+/** Full URL of the MCP endpoint (used as the OAuth2 `resource` identifier). */
 function resolveResourceUrl(options: HttpTransportOptions): string {
   if (options.publicUrl) return options.publicUrl.replace(/\/$/, "") || options.publicUrl;
   return `http://${options.host}:${options.port}${options.path}`;
@@ -159,108 +149,73 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   }
 }
 
-function writeJsonRpcError(res: ServerResponse, status: number, message: string): void {
+async function readUrlEncodedBody(req: IncomingMessage): Promise<Record<string, string>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(chunk as Buffer);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8");
+  if (!raw) return {};
+  const params = new URLSearchParams(raw);
+  const result: Record<string, string> = {};
+  for (const [key, value] of params) {
+    result[key] = value;
+  }
+  return result;
+}
+
+function writeJson(res: ServerResponse, status: number, body: unknown, extraHeaders?: Record<string, string>): void {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
-  res.end(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      error: { code: -32000, message },
-      id: null,
-    })
+  if (extraHeaders) {
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      res.setHeader(k, v);
+    }
+  }
+  res.end(JSON.stringify(body));
+}
+
+function writeJsonRpcError(res: ServerResponse, status: number, message: string): void {
+  writeJson(res, status, { jsonrpc: "2.0", error: { code: -32000, message }, id: null });
+}
+
+function writeOAuthError(res: ServerResponse, status: number, wwwAuthenticate: string, message: string): void {
+  writeJson(
+    res,
+    status,
+    { jsonrpc: "2.0", error: { code: -32001, message }, id: null },
+    {
+      "WWW-Authenticate": wwwAuthenticate,
+    }
   );
-}
-
-interface SessionEntry {
-  transport: StreamableHTTPServerTransport;
-  server: McpServer;
-  lastActivityAt: number;
-}
-
-async function destroySession(entry: SessionEntry): Promise<void> {
-  // Close transport and server independently so a failure in one still lets
-  // the other release its resources. We swallow errors because the caller
-  // already lost interest in this session.
-  await Promise.allSettled([
-    Promise.resolve().then(() => entry.transport.close()),
-    Promise.resolve().then(() => entry.server.close()),
-  ]);
 }
 
 export async function startHttpTransport(
   createServerFactory: () => McpServer,
   options: HttpTransportOptions
 ): Promise<HttpServerHandle> {
-  const sessions = new Map<string, SessionEntry>();
-  const sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
-  const sessionSweepIntervalMs = options.sessionSweepIntervalMs ?? DEFAULT_SESSION_SWEEP_INTERVAL_MS;
   const allowedHosts = resolveAllowedHosts(options.allowedHosts, options.host);
   const resourceUrl = resolveResourceUrl(options);
-  const authorizationServer = resolveAuthorizationServer();
-  const advertisedScopes = resolveAdvertisedScopes();
-  // Per RFC 9728 §3.2 the metadata URL is `/.well-known/oauth-protected-resource`
-  // optionally suffixed with the resource path so multiple resources can
-  // coexist on one host. We serve both for compatibility.
-  const metadataUrl = `${resourceUrl.replace(options.path, "")}/.well-known/oauth-protected-resource${options.path}`;
-  const wwwAuthenticate = `Bearer realm="${resourceUrl}", resource_metadata="${metadataUrl}"`;
+  const baseUrl = resolveBaseUrl(options);
 
-  const sweepIdleSessions = async (): Promise<number> => {
-    const cutoff = Date.now() - sessionTtlMs;
-    const expired: Array<[string, SessionEntry]> = [];
-    for (const [id, entry] of sessions) {
-      if (entry.lastActivityAt < cutoff) {
-        expired.push([id, entry]);
-      }
-    }
-    for (const [id] of expired) sessions.delete(id);
-    await Promise.all(expired.map(([, entry]) => destroySession(entry)));
-    return expired.length;
-  };
+  // The MCP server itself is the OAuth Authorization Server proxy.
+  // The resource_metadata points to the base URL discovery endpoint.
+  const resourceMetadataUrl = `${baseUrl}/.well-known/oauth-protected-resource`;
+  const wwwAuthenticate = `Bearer realm="${resourceUrl}", resource_metadata="${resourceMetadataUrl}"`;
 
-  // Periodic sweep — only meaningful in stateful mode. `unref()` lets the
-  // process exit naturally even when the timer is pending.
-  let sweepTimer: NodeJS.Timeout | undefined;
-  if (!options.stateless) {
-    sweepTimer = setInterval(() => {
-      void sweepIdleSessions();
-    }, sessionSweepIntervalMs);
-    sweepTimer.unref?.();
-  }
-
-  /** Write the RFC 9728 protected-resource metadata document. */
-  const writeProtectedResourceMetadata = (res: ServerResponse): void => {
-    const doc = buildProtectedResourceMetadata({
-      resource: resourceUrl,
-      authorizationServers: [authorizationServer],
-      scopesSupported: advertisedScopes,
-    });
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Cache-Control", "public, max-age=3600");
-    res.end(JSON.stringify(doc));
-  };
-
-  /** RFC 6750 §3.1 challenge for missing/invalid bearer tokens. */
-  const writeOAuthChallenge = (res: ServerResponse, status: number, message: string): void => {
-    res.statusCode = status;
-    res.setHeader("WWW-Authenticate", wwwAuthenticate);
-    res.setHeader("Content-Type", "application/json");
-    res.end(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        error: { code: -32001, message },
-        id: null,
-      })
-    );
-  };
+  // BoondManager OAuth app credentials (required for the proxy flow).
+  const boondClientId = readEnv("BOOND_OAUTH_CLIENT_ID") ?? "";
+  const boondClientSecret = readEnv("BOOND_OAUTH_CLIENT_SECRET") ?? "";
+  const boondAuthUrl = readEnv("BOOND_OAUTH_AUTH_URL") ?? "https://ui.boondmanager.com/oauth/authorize";
+  const boondTokenUrl = readEnv("BOOND_OAUTH_TOKEN_URL") ?? "https://ui.boondmanager.com/oauth/token";
+  const boondRedirectUri = readEnv("BOOND_OAUTH_REDIRECT_URI") ?? `${baseUrl}/auth/callback`;
 
   const httpServer = createServer(async (req, res) => {
     const corrId = generateCorrelationId();
     const reqLogger = logger.child({ corrId, method: req.method, path: req.url });
 
     try {
-      // DNS rebinding protection: validate the Host header against the
-      // configured allow-list before doing anything else. See CVE-2025-66414.
+      // DNS rebinding protection (CVE-2025-66414).
       if (allowedHosts.length > 0) {
         const hostname = extractHostname(req.headers.host);
         if (!hostname) {
@@ -274,115 +229,269 @@ export async function startHttpTransport(
       }
 
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      const { pathname } = url;
 
-      // Public OAuth2 discovery endpoint (RFC 9728). Must be reachable
-      // without authentication — clients fetch it to learn where to send
-      // the user for authorization. Served at both the canonical root path
-      // and the path-suffixed variant per RFC 9728 §3.2.
+      // ── RFC 9728: OAuth2 protected-resource metadata ──────────────────────
+      // The MCP server is the authorization server proxy — authorization_servers
+      // points to itself (baseUrl), not to BoondManager directly.
       if (
         req.method === "GET" &&
-        (url.pathname === "/.well-known/oauth-protected-resource" ||
-          url.pathname === `/.well-known/oauth-protected-resource${options.path}`)
+        (pathname === "/.well-known/oauth-protected-resource" ||
+          pathname === `/.well-known/oauth-protected-resource${options.path}`)
       ) {
-        writeProtectedResourceMetadata(res);
+        const doc = buildProtectedResourceMetadata({
+          resource: resourceUrl,
+          authorizationServers: [baseUrl],
+        });
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Cache-Control", "public, max-age=3600");
+        res.end(JSON.stringify(doc));
         return;
       }
 
-      if (url.pathname !== options.path) {
+      // ── RFC 8414: OAuth2 Authorization Server metadata ────────────────────
+      if (req.method === "GET" && pathname === "/.well-known/oauth-authorization-server") {
+        writeJson(
+          res,
+          200,
+          {
+            issuer: baseUrl,
+            authorization_endpoint: `${baseUrl}/authorize`,
+            token_endpoint: `${baseUrl}/token`,
+            registration_endpoint: `${baseUrl}/register`,
+            response_types_supported: ["code"],
+            grant_types_supported: ["authorization_code"],
+            code_challenge_methods_supported: ["S256", "plain"],
+            token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
+          },
+          { "Cache-Control": "public, max-age=3600" }
+        );
+        return;
+      }
+
+      // ── RFC 7591: Dynamic Client Registration ─────────────────────────────
+      if (req.method === "POST" && pathname === "/register") {
+        const body = (await readJsonBody(req)) as Record<string, unknown> | undefined;
+        const redirectUris = (body?.["redirect_uris"] as string[] | undefined) ?? [];
+        const clientName = (body?.["client_name"] as string | undefined) ?? "Unknown client";
+
+        const clientId = generateToken();
+        const clientSecret = generateToken();
+        registerClient({ clientId, clientSecret, redirectUris, clientName });
+
+        writeJson(res, 201, {
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uris: redirectUris,
+          client_name: clientName,
+          client_id_issued_at: Math.floor(Date.now() / 1000),
+          grant_types: ["authorization_code"],
+          response_types: ["code"],
+          token_endpoint_auth_method: "client_secret_post",
+        });
+        return;
+      }
+
+      // ── Authorization endpoint: redirect to BoondManager OAuth ───────────
+      if (req.method === "GET" && pathname === "/authorize") {
+        const clientId = url.searchParams.get("client_id") ?? "";
+        const redirectUri = url.searchParams.get("redirect_uri") ?? "";
+        const clientState = url.searchParams.get("state") ?? "";
+        const codeChallenge = url.searchParams.get("code_challenge") ?? "";
+        const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "plain";
+
+        // ourState links this pending request to the BoondManager callback.
+        const ourState = generateToken();
+        storePendingAuth(ourState, {
+          clientId,
+          redirectUri,
+          clientState,
+          codeChallenge,
+          codeChallengeMethod,
+        });
+
+        const boondUrl = new URL(boondAuthUrl);
+        boondUrl.searchParams.set("client_id", boondClientId);
+        boondUrl.searchParams.set("redirect_uri", boondRedirectUri);
+        boondUrl.searchParams.set("response_type", "code");
+        boondUrl.searchParams.set("state", ourState);
+
+        res.statusCode = 302;
+        res.setHeader("Location", boondUrl.toString());
+        res.end();
+        return;
+      }
+
+      // ── OAuth callback: exchange BoondManager code → store mapping ────────
+      if (req.method === "GET" && pathname === "/auth/callback") {
+        const code = url.searchParams.get("code");
+        const state = url.searchParams.get("state") ?? "";
+
+        const pending = getPendingAuth(state);
+        // Always redirect — never show an error page in the callback.
+        if (!pending) {
+          reqLogger.warn({ state }, "OAuth callback with unknown state");
+          res.statusCode = 302;
+          res.setHeader("Location", baseUrl);
+          res.end();
+          return;
+        }
+        deletePendingAuth(state);
+
+        const redirectToClient = (extraParams: Record<string, string>): void => {
+          const redirectUrl = new URL(pending.redirectUri);
+          redirectUrl.searchParams.set("state", pending.clientState);
+          for (const [k, v] of Object.entries(extraParams)) {
+            redirectUrl.searchParams.set(k, v);
+          }
+          res.statusCode = 302;
+          res.setHeader("Location", redirectUrl.toString());
+          res.end();
+        };
+
+        if (!code) {
+          redirectToClient({ error: url.searchParams.get("error") ?? "access_denied" });
+          return;
+        }
+
+        try {
+          const tokenRes = await fetch(boondTokenUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "authorization_code",
+              client_id: boondClientId,
+              client_secret: boondClientSecret,
+              code,
+              redirect_uri: boondRedirectUri,
+            }).toString(),
+          });
+
+          if (!tokenRes.ok) {
+            reqLogger.error({ status: tokenRes.status }, "BoondManager token exchange failed");
+            redirectToClient({ error: "server_error" });
+            return;
+          }
+
+          const tokenData = (await tokenRes.json()) as Record<string, unknown>;
+          const boondToken = tokenData["access_token"] as string | undefined;
+          if (!boondToken) {
+            redirectToClient({ error: "server_error" });
+            return;
+          }
+
+          const ourCode = generateToken();
+          storeAuthCode(ourCode, {
+            clientId: pending.clientId,
+            redirectUri: pending.redirectUri,
+            codeChallenge: pending.codeChallenge,
+            codeChallengeMethod: pending.codeChallengeMethod,
+            boondToken,
+            createdAt: Date.now(),
+          });
+
+          redirectToClient({ code: ourCode });
+        } catch (err) {
+          reqLogger.error({ err }, "BoondManager token exchange error");
+          redirectToClient({ error: "server_error" });
+        }
+        return;
+      }
+
+      // ── Token endpoint: exchange our auth code → our access token ─────────
+      if (req.method === "POST" && pathname === "/token") {
+        const ct = req.headers["content-type"] ?? "";
+        const body = ct.includes("application/x-www-form-urlencoded")
+          ? await readUrlEncodedBody(req)
+          : (((await readJsonBody(req)) as Record<string, string> | undefined) ?? {});
+
+        const { grant_type, code, client_id, client_secret, code_verifier } = body;
+
+        if (grant_type !== "authorization_code") {
+          writeJson(res, 400, { error: "unsupported_grant_type" });
+          return;
+        }
+
+        const storedCode = getAuthCode(code ?? "");
+        if (!storedCode) {
+          writeJson(res, 400, { error: "invalid_grant" });
+          return;
+        }
+        deleteAuthCode(code ?? "");
+
+        if (storedCode.clientId !== client_id) {
+          writeJson(res, 401, { error: "invalid_client" });
+          return;
+        }
+
+        const registeredClient = getRegisteredClient(client_id ?? "");
+        if (!registeredClient || registeredClient.clientSecret !== client_secret) {
+          writeJson(res, 401, { error: "invalid_client" });
+          return;
+        }
+
+        if (storedCode.codeChallenge) {
+          if (!code_verifier || !verifyPKCE(code_verifier, storedCode.codeChallenge, storedCode.codeChallengeMethod)) {
+            writeJson(res, 400, { error: "invalid_grant", error_description: "PKCE verification failed" });
+            return;
+          }
+        }
+
+        const accessToken = generateToken();
+        storeAccessToken(accessToken, {
+          boondToken: storedCode.boondToken,
+          clientId: client_id ?? "",
+          createdAt: Date.now(),
+        });
+
+        writeJson(res, 200, {
+          access_token: accessToken,
+          token_type: "Bearer",
+          expires_in: 3600,
+        });
+        return;
+      }
+
+      // ── MCP endpoint: served at /mcp and / (Dust connects to the root) ────
+      const isMcpEndpoint = pathname === options.path || pathname === "/";
+      if (!isMcpEndpoint) {
         res.statusCode = 404;
         res.end("Not found");
         return;
       }
 
-      // OAuth2 Bearer is mandatory on the MCP endpoint. The token is opaque
-      // to us — we forward it to BoondManager, which is authoritative.
-      const accessToken = extractBearerToken(req.headers["authorization"]);
-      if (!accessToken) {
-        writeOAuthChallenge(
-          res,
-          401,
-          "Missing Bearer token. Authenticate against BoondManager and include `Authorization: Bearer <access_token>`."
-        );
+      // Check method before auth so a GET without a token gets 405, not 401.
+      if (req.method !== "POST") {
+        writeJsonRpcError(res, 405, "Only POST is supported");
         return;
       }
 
-      // Wrap the rest of the request lifecycle in the AsyncLocalStorage
-      // context so boond-client's `oauthContextAuth` can pull the token
-      // out when issuing API calls.
-      await oauthContext.run({ accessToken }, async () => {
-        if (options.stateless) {
-          if (req.method !== "POST") {
-            writeJsonRpcError(res, 405, "Only POST is supported in stateless mode");
-            return;
-          }
-          const transport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: undefined,
-            enableJsonResponse: options.enableJsonResponse,
-          });
-          const server = createServerFactory();
-          res.on("close", () => {
-            void transport.close();
-            void server.close();
-          });
-          await server.connect(transport);
-          await transport.handleRequest(req, res);
-          return;
-        }
+      const ourToken = extractBearerToken(req.headers["authorization"]);
+      if (!ourToken) {
+        writeOAuthError(res, 401, wwwAuthenticate, "Missing Bearer token. Complete the OAuth flow first.");
+        return;
+      }
 
-        // Stateful mode: route by Mcp-Session-Id header
-        const sessionIdHeader = req.headers["mcp-session-id"];
-        const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+      const tokenData = getAccessToken(ourToken);
+      if (!tokenData) {
+        writeOAuthError(res, 401, wwwAuthenticate, "Invalid or expired Bearer token.");
+        return;
+      }
 
-        if (sessionId && sessions.has(sessionId)) {
-          const entry = sessions.get(sessionId)!;
-          entry.lastActivityAt = Date.now();
-          await entry.transport.handleRequest(req, res);
-          return;
-        }
-
-        if (req.method !== "POST") {
-          writeJsonRpcError(res, 400, "Missing or invalid session ID");
-          return;
-        }
-
-        // Parse body to detect initialization
-        const body = await readJsonBody(req);
-        if (!isInitializeRequest(body)) {
-          writeJsonRpcError(res, 400, "First request must be an MCP initialize message");
-          return;
-        }
-
+      // Map our token → BoondManager token and inject into the per-request context.
+      await oauthContext.run({ accessToken: tokenData.boondToken }, async () => {
         const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
+          sessionIdGenerator: undefined,
           enableJsonResponse: options.enableJsonResponse,
-          onsessioninitialized: (id) => {
-            sessions.set(id, { transport, server, lastActivityAt: Date.now() });
-            reqLogger.info({ sessionId: id, sessionCount: sessions.size }, "MCP session initialized");
-          },
-          onsessionclosed: (id) => {
-            const entry = sessions.get(id);
-            if (entry) {
-              sessions.delete(id);
-              void destroySession(entry);
-              reqLogger.info({ sessionId: id, sessionCount: sessions.size }, "MCP session closed");
-            }
-          },
         });
-        transport.onclose = () => {
-          const id = transport.sessionId;
-          if (!id) return;
-          const entry = sessions.get(id);
-          if (entry) {
-            sessions.delete(id);
-            // Server is closed by destroySession — but if the transport's own
-            // close path already disposed it, the second call is a no-op.
-            void entry.server.close().catch(() => undefined);
-          }
-        };
-
         const server = createServerFactory();
+        res.on("close", () => {
+          void transport.close();
+          void server.close();
+        });
         await server.connect(transport);
-        await transport.handleRequest(req, res, body);
+        await transport.handleRequest(req, res);
       });
     } catch (error) {
       reqLogger.error({ err: error }, "HTTP transport error");
@@ -404,13 +513,9 @@ export async function startHttpTransport(
 
   return {
     address: { host: options.host, port: options.port, path: options.path },
-    sessionCount: () => sessions.size,
-    sweepIdleSessions,
+    sessionCount: () => 0,
+    sweepIdleSessions: () => Promise.resolve(0),
     close: async () => {
-      if (sweepTimer) clearInterval(sweepTimer);
-      const entries = Array.from(sessions.values());
-      sessions.clear();
-      await Promise.all(entries.map((e) => destroySession(e)));
       await new Promise<void>((resolve, reject) => {
         httpServer.close((err) => (err ? reject(err) : resolve()));
       });
