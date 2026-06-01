@@ -92,8 +92,9 @@ function extractHostname(hostHeader: string | string[] | undefined): string | un
 }
 
 export function resolveHttpOptions(): HttpTransportOptions {
-  // Railway sets PORT; MCP_HTTP_PORT is the per-project override.
-  const portRaw = readEnv("MCP_HTTP_PORT") ?? readEnv("PORT");
+  // PORT is Railway's injected variable and always wins.
+  // MCP_HTTP_PORT is a local/Docker override for non-Railway deployments.
+  const portRaw = readEnv("PORT") ?? readEnv("MCP_HTTP_PORT");
   const port = portRaw ? Number.parseInt(portRaw, 10) : 3000;
   if (!Number.isFinite(port) || port <= 0 || port > 65535) {
     throw new Error(`Invalid MCP_HTTP_PORT: ${portRaw}`);

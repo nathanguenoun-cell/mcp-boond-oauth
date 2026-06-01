@@ -3,5 +3,5 @@ builder = "DOCKERFILE"
 
 [deploy]
 healthcheckPath = "/.well-known/oauth-protected-resource"
-healthcheckTimeout = 10
+healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
