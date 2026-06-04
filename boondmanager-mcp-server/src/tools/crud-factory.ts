@@ -150,7 +150,7 @@ Returns: Données mises à jour du/de la ${opts.entityName}.`,
       const p = params as Record<string, unknown>;
       const id = p.id as string;
       const body = buildBody(p);
-      const response = await apiRequest(`${opts.apiPath}/${id}`, "PATCH", body);
+      const response = await apiRequest(`${opts.apiPath}/${id}`, "PUT", body);
       return {
         content: [{
           type: "text" as const,
