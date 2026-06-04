@@ -1,0 +1,75 @@
+name: Deploy to Infomaniak VPS
+
+on:
+  push:
+    branches: [main]
+  # Déclenchement manuel — utile pour rollbacks ou redeploys forcés
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: SSH deploy → VPS
+    runs-on: ubuntu-latest
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false   # ne jamais interrompre un déploiement en cours
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+
+      - name: Add VPS to known hosts
+        run: ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Copy docker-compose.yml to VPS
+        run: |
+          scp docker-compose.yml \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/boondmanager-mcp/docker-compose.yml
+
+      - name: Deploy on VPS
+        run: |
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          cd /opt/boondmanager-mcp
+
+          # Pull la nouvelle image MCP (Redis est en local, pas de pull nécessaire)
+          docker compose pull mcp
+
+          # Démarrer/redémarrer les conteneurs
+          docker compose up -d --remove-orphans
+
+          # Attendre que le conteneur MCP soit healthy (max 60s)
+          echo "Attente du healthcheck..."
+          for i in $(seq 1 12); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' boondmanager-mcp 2>/dev/null || echo "starting")
+            if [ "$STATUS" = "healthy" ]; then
+              echo "Conteneur healthy."
+              break
+            fi
+            echo "  tentative $i/12: status=$STATUS"
+            sleep 5
+          done
+
+          FINAL=$(docker inspect --format='{{.State.Health.Status}}' boondmanager-mcp 2>/dev/null || echo "unknown")
+          if [ "$FINAL" != "healthy" ]; then
+            echo "ERREUR : le conteneur n'est pas healthy après le déploiement."
+            docker logs --tail=50 boondmanager-mcp
+            exit 1
+          fi
+
+          # Nettoyage des anciennes images
+          docker image prune -f
+          echo "Déploiement OK."
+          ENDSSH
+
+      - name: Smoke test (vérification HTTPS)
+        run: |
+          sleep 3
+          curl --fail --silent --max-time 10 \
+            https://${{ secrets.MCP_PUBLIC_HOSTNAME }}/.well-known/oauth-protected-resource \
+            | jq '.resource'

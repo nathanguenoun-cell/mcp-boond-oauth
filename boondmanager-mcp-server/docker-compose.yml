@@ -1,29 +1,32 @@
-# BoondManager MCP server — production-leaning compose example.
+# BoondManager MCP server — production deployment (Infomaniak VPS / any Docker host).
 #
-# This is a fully stateless service:
-#   - No volume, no secret on disk, no client_secret.
-#   - The MCP server is an OAuth2 protected resource — each request from
-#     the MCP client must carry `Authorization: Bearer <boond_access_token>`.
-#   - The MCP client (Claude Desktop, Claude Code, MCP gateway, …) does
-#     the OAuth dance against BoondManager directly and refreshes its own
-#     token. The server holds nothing.
+# Stack : Node.js MCP server + Redis (sessions OAuth persistées sur disque).
+# Redis survit aux reboots du VPS via le volume nommé `redis-data`.
 #
-# Quick start:
-#   1. (Optional) cp .env.example .env  &&  set MCP_HTTP_PUBLIC_URL if
-#      you front this with a reverse proxy. No secrets to set.
-#   2. docker compose up -d
-#   3. Discover the OAuth metadata:
-#      curl http://localhost:3000/.well-known/oauth-protected-resource
-#   4. Configure your MCP client with the resulting URL — the client
-#      handles the OAuth flow with BoondManager from there.
+# Prérequis :
+#   1. Créer /opt/boondmanager-mcp/.env avec les variables secrètes (voir ci-dessous)
+#   2. Mettre nginx en reverse proxy sur le port 3000 avec proxy_buffering off
+#      (voir nginx/boondmanager-mcp.conf)
 #
-# Behind a reverse proxy (Traefik / Caddy / Nginx), add TLS upstream
-# and set MCP_HTTP_PUBLIC_URL to the public HTTPS URL so the discovery
-# metadata advertises the right resource identifier.
+# Variables à mettre dans .env (ne pas commiter) :
+#   MCP_HTTP_PUBLIC_URL   — URL HTTPS publique, ex: https://mcp.votre-domaine.com/mcp
+#   BOOND_OAUTH_CLIENT_ID
+#   BOOND_OAUTH_CLIENT_SECRET
+#   BOOND_OAUTH_AUTH_URL  — défaut: https://ui.boondmanager.com/oauth/authorize
+#   BOOND_OAUTH_TOKEN_URL — défaut: https://ui.boondmanager.com/oauth/token
+#   BOOND_SESSION_TTL_DAYS — défaut: 90
+#
+# Démarrage :
+#   docker compose pull && docker compose up -d
+#
+# Logs :
+#   docker logs -f boondmanager-mcp
+#   docker logs -f boondmanager-redis
 
 services:
   mcp:
-    image: ghcr.io/fauguste/boondmanager-mcp-server:latest
+    image: ghcr.io/fauguste/boondmanager-mcp-server:2.1.0
+    container_name: boondmanager-mcp
     restart: unless-stopped
     ports:
       - "127.0.0.1:3000:3000"
@@ -31,13 +34,51 @@ services:
       - .env
     environment:
       MCP_TRANSPORT: http
-      MCP_HTTP_HOST: 0.0.0.0
+      MCP_HTTP_HOST: "0.0.0.0"
       MCP_HTTP_PORT: "3000"
       MCP_HTTP_PATH: /mcp
       MCP_HTTP_STATEFUL: "false"
+      # nginx gère la validation du Host — désactiver le check DNS rebinding
+      # dans le conteneur (nginx est la vraie frontière de sécurité)
+      MCP_HTTP_ALLOWED_HOSTS: "*"
+      REDIS_URL: "redis://redis:6379"
+      NODE_ENV: production
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+process.env.MCP_HTTP_PORT+'/.well-known/oauth-protected-resource').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/.well-known/oauth-protected-resource').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  redis:
+    image: redis:7-alpine
+    container_name: boondmanager-redis
+    restart: unless-stopped
+    # Persistance : sauvegarde RDB + AOF — les sessions survivent aux reboots du VPS
+    command: redis-server --save 900 1 --save 300 10 --save 60 10000 --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  redis-data:
+    driver: local
