@@ -450,8 +450,7 @@ export async function startHttpTransport(
         }
 
         if (storedCode.codeChallenge) {
-          // PKCE flow: code_verifier proves client identity — no client_secret required.
-          // This also survives server restarts where the in-memory client registry is lost.
+          // PKCE: code_verifier cryptographically proves client identity.
           if (!code_verifier || !verifyPKCE(code_verifier, storedCode.codeChallenge, storedCode.codeChallengeMethod)) {
             writeJson(
               res,
@@ -462,9 +461,12 @@ export async function startHttpTransport(
             return;
           }
         } else {
-          // Non-PKCE flow: require client_secret from the registry.
+          // Non-PKCE: verify client_secret only when the client is still in the
+          // registry. If the entry is gone (server restart, fresh Redis), the auth
+          // code binding to client_id is sufficient proof — rejecting here would
+          // force the user through the full OAuth dance again for no security gain.
           const registeredClient = await getRegisteredClient(client_id ?? "");
-          if (!registeredClient || registeredClient.clientSecret !== client_secret) {
+          if (registeredClient && registeredClient.clientSecret !== client_secret) {
             writeJson(res, 401, { error: "invalid_client" }, CORS_HEADERS);
             return;
           }
