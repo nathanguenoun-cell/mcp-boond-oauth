@@ -325,6 +325,13 @@ export async function startHttpTransport(
         const codeChallenge = url.searchParams.get("code_challenge") ?? "";
         const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "plain";
 
+        // Validate redirect_uri against the registered client to prevent open redirect attacks.
+        const clientReg = await getRegisteredClient(clientId);
+        if (!clientReg || !clientReg.redirectUris.includes(redirectUri)) {
+          writeJson(res, 400, { error: "invalid_request", error_description: "redirect_uri not registered for this client" }, CORS_HEADERS);
+          return;
+        }
+
         // ourState links this pending request to the BoondManager callback.
         const ourState = generateToken();
         await storePendingAuth(ourState, {
@@ -400,6 +407,7 @@ export async function startHttpTransport(
 
           const tokenData = (await tokenRes.json()) as Record<string, unknown>;
           const boondToken = tokenData["access_token"] as string | undefined;
+          const boondRefreshToken = tokenData["refresh_token"] as string | undefined;
           if (!boondToken) {
             redirectToClient({ error: "server_error" });
             return;
@@ -412,6 +420,7 @@ export async function startHttpTransport(
             codeChallenge: pending.codeChallenge,
             codeChallengeMethod: pending.codeChallengeMethod,
             boondToken,
+            boondRefreshToken,
             createdAt: Date.now(),
           });
 
@@ -475,6 +484,7 @@ export async function startHttpTransport(
         const accessToken = generateToken();
         await storeAccessToken(accessToken, {
           boondToken: storedCode.boondToken,
+          boondRefreshToken: storedCode.boondRefreshToken,
           clientId: client_id ?? "",
           createdAt: Date.now(),
         });
@@ -485,7 +495,7 @@ export async function startHttpTransport(
           {
             access_token: accessToken,
             token_type: "Bearer",
-            expires_in: 3600,
+            expires_in: 24 * 60 * 60,
           },
           CORS_HEADERS
         );

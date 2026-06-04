@@ -22,11 +22,13 @@ export interface StoredAuthCode {
   codeChallenge: string;
   codeChallengeMethod: string;
   boondToken: string;
+  boondRefreshToken?: string;
   createdAt: number;
 }
 
 export interface StoredAccessToken {
   boondToken: string;
+  boondRefreshToken?: string;
   clientId: string;
   createdAt: number;
 }
