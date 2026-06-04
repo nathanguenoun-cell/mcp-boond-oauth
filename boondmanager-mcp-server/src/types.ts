@@ -33,6 +33,8 @@ export type BoondAuthProvider = () => Promise<{ name: string; value: string }>;
 export interface BoondConfig {
   baseUrl: string;
   auth: BoondAuthProvider;
+  /** Called when BoondManager returns 401. Should refresh the token and return true on success. */
+  onTokenRefresh?: () => Promise<boolean>;
 }
 
 export interface SearchParams {

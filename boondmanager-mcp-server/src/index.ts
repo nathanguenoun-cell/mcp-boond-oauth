@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { initClient, initClientWithAuth, oauthContextAuth } from "./services/boond-client.js";
+import { initClient, initClientWithAuth, oauthContextAuth, createOAuthRefreshProvider } from "./services/boond-client.js";
 import { createMcpServer, REGISTERED_DOMAINS } from "./server.js";
 import { runUpdateNotification } from "./services/update-checker.js";
 import { resolveHttpOptions, startHttpTransport } from "./transports/http.js";
@@ -45,7 +45,7 @@ async function main(): Promise<void> {
     // Registration, /authorize, /token) and maps Dust tokens to BoondManager
     // tokens per user. No client secrets are stored past the OAuth flow.
     await getKVStore(); // eager init so the Redis/memory log appears at startup
-    initClientWithAuth(oauthContextAuth);
+    initClientWithAuth(oauthContextAuth, undefined, createOAuthRefreshProvider());
     const options = resolveHttpOptions();
     const handle = await startHttpTransport(createMcpServer, options);
     console.error("🚀 BoondManager MCP Server running (streamable HTTP + OAuth proxy)");

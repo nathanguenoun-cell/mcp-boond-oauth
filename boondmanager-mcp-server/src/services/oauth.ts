@@ -24,8 +24,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
  */
 
 export interface OAuthRequestContext {
-  /** Bearer access token received from the MCP client (forwarded verbatim to Boond). */
+  /** BoondManager access token forwarded to the API. Mutated in-place on refresh. */
   accessToken: string;
+  /** BoondManager refresh token — used to silently renew accessToken on 401. */
+  boondRefreshToken?: string;
+  /** Key of this session in the KV store — needed to persist the refreshed token. */
+  ourToken?: string;
 }
 
 /**

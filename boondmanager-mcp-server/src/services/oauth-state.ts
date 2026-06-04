@@ -1,5 +1,19 @@
 import { createHash, randomBytes } from "node:crypto";
+import { DEFAULT_SESSION_TTL_DAYS } from "../constants.js";
 import { getKVStore } from "./kv-store.js";
+
+function resolveSessionTtlSeconds(): number {
+  const raw = process.env["BOOND_SESSION_TTL_DAYS"];
+  if (!raw || raw.startsWith("${")) return DEFAULT_SESSION_TTL_DAYS * 24 * 60 * 60;
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days <= 0) return DEFAULT_SESSION_TTL_DAYS * 24 * 60 * 60;
+  return Math.floor(days * 24 * 60 * 60);
+}
+
+/** Exposed so the token endpoint can include the correct expires_in in its response. */
+export function getSessionTtlSeconds(): number {
+  return resolveSessionTtlSeconds();
+}
 
 export interface RegisteredClient {
   clientId: string;
@@ -41,9 +55,8 @@ const KEY = {
 };
 
 const TTL = {
-  PENDING_AUTH: 10 * 60,      // 10 min
-  AUTH_CODE: 10 * 60,         // 10 min
-  ACCESS_TOKEN: 24 * 60 * 60, // 24 h
+  PENDING_AUTH: 10 * 60, // 10 min
+  AUTH_CODE: 10 * 60,    // 10 min
 };
 
 export function generateToken(): string {
@@ -103,7 +116,29 @@ export async function deleteAuthCode(code: string): Promise<void> {
 
 export async function storeAccessToken(token: string, data: StoredAccessToken): Promise<void> {
   const store = await getKVStore();
-  await store.set(KEY.token(token), JSON.stringify(data), TTL.ACCESS_TOKEN);
+  await store.set(KEY.token(token), JSON.stringify(data), resolveSessionTtlSeconds());
+}
+
+/**
+ * Replace the BoondManager token stored under an existing session key.
+ * Called after a transparent refresh so future requests use the new token.
+ * Resets the TTL to the full session length (sliding window behaviour).
+ */
+export async function updateBoondToken(
+  ourToken: string,
+  newBoondToken: string,
+  newRefreshToken?: string
+): Promise<void> {
+  const store = await getKVStore();
+  const raw = await store.get(KEY.token(ourToken));
+  if (!raw) return;
+  const existing = JSON.parse(raw) as StoredAccessToken;
+  const updated: StoredAccessToken = {
+    ...existing,
+    boondToken: newBoondToken,
+    boondRefreshToken: newRefreshToken ?? existing.boondRefreshToken,
+  };
+  await store.set(KEY.token(ourToken), JSON.stringify(updated), resolveSessionTtlSeconds());
 }
 
 export async function getAccessToken(token: string): Promise<StoredAccessToken | undefined> {

@@ -1,3 +1,8 @@
+// Default session length for OAuth access tokens (HTTP transport).
+// Overridable via BOOND_SESSION_TTL_DAYS. With automatic token refresh, users
+// authenticate once and stay connected until the session expires or they revoke.
+export const DEFAULT_SESSION_TTL_DAYS = 90;
+
 // BoondManager API constants
 export const DEFAULT_BASE_URL = "https://ui.boondmanager.com/api";
 export const CHARACTER_LIMIT = 50000;

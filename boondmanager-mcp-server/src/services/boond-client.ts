@@ -12,6 +12,7 @@ import {
 import type { BoondAuthProvider, BoondConfig, JsonApiResponse, SearchParams } from "../types.js";
 import { TokenBucket } from "./rate-limiter.js";
 import { oauthContext } from "./oauth.js";
+import { updateBoondToken } from "./oauth-state.js";
 
 let config: BoondConfig | null = null;
 
@@ -107,10 +108,65 @@ export function initClient(): void {
  * wire in an OAuth2 token source (where the access token is refreshed
  * transparently per request rather than baked in at startup).
  */
-export function initClientWithAuth(auth: BoondAuthProvider, baseUrl?: string): void {
+export function initClientWithAuth(
+  auth: BoondAuthProvider,
+  baseUrl?: string,
+  onTokenRefresh?: () => Promise<boolean>
+): void {
   config = {
     baseUrl: baseUrl ?? envOrUndefined("BOOND_BASE_URL") ?? DEFAULT_BASE_URL,
     auth,
+    onTokenRefresh,
+  };
+}
+
+/**
+ * Build a token-refresh callback for the HTTP/OAuth transport.
+ * When BoondManager returns 401, this exchanges the stored refresh_token for a
+ * new access_token, updates the per-request context, and persists the new
+ * tokens in the KV store — the original API call is then retried transparently.
+ */
+export function createOAuthRefreshProvider(): () => Promise<boolean> {
+  return async () => {
+    const ctx = oauthContext.getStore();
+    if (!ctx?.boondRefreshToken || !ctx.ourToken) return false;
+
+    const tokenUrl = envOrUndefined("BOOND_OAUTH_TOKEN_URL") ?? "https://ui.boondmanager.com/oauth/token";
+    const clientId = envOrUndefined("BOOND_OAUTH_CLIENT_ID") ?? "";
+    const clientSecret = envOrUndefined("BOOND_OAUTH_CLIENT_SECRET") ?? "";
+
+    try {
+      const res = await fetch(tokenUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: ctx.boondRefreshToken,
+          client_id: clientId,
+          client_secret: clientSecret,
+        }).toString(),
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (!res.ok) return false;
+
+      const data = (await res.json()) as Record<string, unknown>;
+      const newBoondToken = data["access_token"] as string | undefined;
+      if (!newBoondToken) return false;
+
+      const newRefreshToken = (data["refresh_token"] as string | undefined) ?? ctx.boondRefreshToken;
+
+      // Mutate context so the retry uses the fresh token immediately.
+      ctx.accessToken = newBoondToken;
+      ctx.boondRefreshToken = newRefreshToken;
+
+      // Persist so future requests (new MCP connections) also use the new token.
+      await updateBoondToken(ctx.ourToken, newBoondToken, newRefreshToken);
+
+      return true;
+    } catch {
+      return false;
+    }
   };
 }
 
@@ -460,6 +516,7 @@ export async function apiRequest(
   const serializedBody = buildBody();
 
   let lastError: Error | undefined;
+  let authRefreshAttempted = false;
 
   const limiter = getRateLimiter();
 
@@ -534,6 +591,18 @@ export async function apiRequest(
     const retryable = isRetryable(method, response?.status, isNetworkOrTimeout);
 
     if (!hasMoreAttempts || !retryable) {
+      // On first 401, attempt a transparent token refresh before giving up.
+      if (response?.status === 401 && !authRefreshAttempted) {
+        const cfg = getConfig();
+        if (cfg.onTokenRefresh) {
+          authRefreshAttempted = true;
+          const refreshed = await cfg.onTokenRefresh().catch(() => false);
+          if (refreshed) {
+            attempt--; // re-run this attempt; for-loop will increment back to same value
+            continue;
+          }
+        }
+      }
       throw attemptError;
     }
 

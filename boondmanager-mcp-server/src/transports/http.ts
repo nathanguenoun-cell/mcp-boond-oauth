@@ -11,6 +11,7 @@ import {
   getAuthCode,
   getPendingAuth,
   getRegisteredClient,
+  getSessionTtlSeconds,
   registerClient,
   storeAccessToken,
   storeAuthCode,
@@ -495,7 +496,7 @@ export async function startHttpTransport(
           {
             access_token: accessToken,
             token_type: "Bearer",
-            expires_in: 24 * 60 * 60,
+            expires_in: getSessionTtlSeconds(),
           },
           CORS_HEADERS
         );
@@ -529,7 +530,11 @@ export async function startHttpTransport(
       }
 
       // Map our token → BoondManager token and inject into the per-request context.
-      await oauthContext.run({ accessToken: tokenData.boondToken }, async () => {
+      await oauthContext.run({
+        accessToken: tokenData.boondToken,
+        boondRefreshToken: tokenData.boondRefreshToken,
+        ourToken,
+      }, async () => {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: undefined,
           enableJsonResponse: options.enableJsonResponse,
