@@ -111,7 +111,7 @@ Returns: Liste des factures correspondantes.`,
     async (params) => {
       const { id, ...attrs } = params;
       const body = buildJsonApiBody("invoice", attrs, id);
-      const response = await apiRequest(`/invoices/${id}`, "PATCH", body);
+      const response = await apiRequest(`/invoices/${id}`, "PUT", body);
       return {
         content: [{
           type: "text" as const,
