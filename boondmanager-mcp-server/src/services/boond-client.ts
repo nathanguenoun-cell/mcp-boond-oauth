@@ -591,8 +591,9 @@ export async function apiRequest(
     const retryable = isRetryable(method, response?.status, isNetworkOrTimeout);
 
     if (!hasMoreAttempts || !retryable) {
-      // On first 401, attempt a transparent token refresh before giving up.
-      if (response?.status === 401 && !authRefreshAttempted) {
+      // On first 401 or 422 (BoondManager returns 422 for expired JWT),
+      // attempt a transparent token refresh before giving up.
+      if ((response?.status === 401 || response?.status === 422) && !authRefreshAttempted) {
         const cfg = getConfig();
         if (cfg.onTokenRefresh) {
           authRefreshAttempted = true;
