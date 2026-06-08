@@ -216,8 +216,8 @@ export async function startHttpTransport(
   // BoondManager OAuth app credentials (required for the proxy flow).
   const boondClientId = readEnv("BOOND_OAUTH_CLIENT_ID") ?? "";
   const boondClientSecret = readEnv("BOOND_OAUTH_CLIENT_SECRET") ?? "";
-  const boondAuthUrl = readEnv("BOOND_OAUTH_AUTH_URL") ?? "https://ui.boondmanager.com/oauth/authorize";
-  const boondTokenUrl = readEnv("BOOND_OAUTH_TOKEN_URL") ?? "https://ui.boondmanager.com/oauth/token";
+  const boondAuthUrl = readEnv("BOOND_OAUTH_AUTH_URL") ?? "https://ui.boondmanager.com/api/oauth2/authorize";
+  const boondTokenUrl = readEnv("BOOND_OAUTH_TOKEN_URL") ?? "https://ui.boondmanager.com/api/oauth2/token";
   const boondRedirectUri = readEnv("BOOND_OAUTH_REDIRECT_URI") ?? `${baseUrl}/auth/callback`;
 
   const httpServer = createServer(async (req, res) => {
