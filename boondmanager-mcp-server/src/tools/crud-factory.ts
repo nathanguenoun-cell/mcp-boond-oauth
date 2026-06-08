@@ -129,7 +129,8 @@ export function registerUpdateTool(
   server: McpServer,
   opts: CrudToolOptions,
   schema: z.ZodType,
-  buildBody: (params: Record<string, unknown>) => unknown
+  buildBody: (params: Record<string, unknown>) => unknown,
+  buildPath?: (id: string, apiPath: string) => string
 ): void {
   server.registerTool(
     `${opts.prefix}_update`,
@@ -150,7 +151,8 @@ Returns: Données mises à jour du/de la ${opts.entityName}.`,
       const p = params as Record<string, unknown>;
       const id = p.id as string;
       const body = buildBody(p);
-      const response = await apiRequest(`${opts.apiPath}/${id}`, "PUT", body);
+      const path = buildPath ? buildPath(id, opts.apiPath) : `${opts.apiPath}/${id}`;
+      const response = await apiRequest(path, "PUT", body);
       return {
         content: [{
           type: "text" as const,

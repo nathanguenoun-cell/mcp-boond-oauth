@@ -120,10 +120,16 @@ export function registerCandidateTools(server: McpServer): void {
     return buildJsonApiBody("candidate", attrs);
   });
 
-  registerUpdateTool(server, OPTS, CandidateUpdateSchema, (params) => {
-    const { id, ...attrs } = params;
-    return buildJsonApiBody("candidate", attrs, id as string);
-  });
+  registerUpdateTool(
+    server,
+    OPTS,
+    CandidateUpdateSchema,
+    (params) => {
+      const { id, ...attrs } = params;
+      return buildJsonApiBody("candidate", attrs, id as string);
+    },
+    (id, apiPath) => `${apiPath}/${id}/information`
+  );
 
   registerDeleteTool(server, OPTS);
 
