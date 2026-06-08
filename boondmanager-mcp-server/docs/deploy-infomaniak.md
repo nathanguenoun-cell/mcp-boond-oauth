@@ -1,129 +1,148 @@
-# Mode opératoire — Déploiement BoondManager MCP sur Infomaniak VPS
+# Déploiement BoondManager MCP — Guide complet Infomaniak
 
-> **Public cible** : administrateur technique du client  
-> **Durée estimée** : 45–90 minutes (hors attente DNS)  
-> **Prérequis niveau** : Linux basique (SSH, copier-coller), pas de développement requis
-
----
-
-## Vue d'ensemble
-
-Le serveur MCP BoondManager s'exécute comme un **conteneur Docker** sur un VPS Infomaniak. Il expose une API HTTPS que Claude Desktop ou Claude Code interroge pour interagir avec BoondManager en langage naturel.
-
-```
-Claude Desktop / Claude Code
-        │
-        │  HTTPS  (MCP sur SSE)
-        ▼
-  mcp.votre-domaine.com   ← nginx (reverse proxy TLS)
-        │
-        │  HTTP localhost:3000
-        ▼
-  Conteneur Docker MCP    ← boondmanager-mcp-server:2.1.0
-        │
-        │  HTTPS API
-        ▼
-  ui.boondmanager.com/api
-```
-
-L'authentification est **OAuth2** : le serveur MCP ne stocke aucun secret BoondManager — chaque utilisateur se connecte avec son propre compte via un flow OAuth standard dans le navigateur.
+> **Version du serveur MCP** : `2.1.0`  
+> **Image Docker** : `ghcr.io/nathanguenoun-cell/mcp-boond-oauth:2.1.0`  
+> **Durée estimée** : 60–90 minutes  
+> **Prérequis niveau** : accès SSH basique, pas de développement requis
 
 ---
 
-## Ressources fournies
+## Ce que vous allez obtenir
 
-Tous les fichiers ci-dessous sont dans le dossier remis avec ce document :
+Un serveur MCP BoondManager accessible en HTTPS depuis Claude Desktop ou Claude Code, permettant d'interroger et modifier vos données BoondManager en langage naturel.
 
-| Fichier | Rôle |
-|---------|------|
-| `docker-compose.yml` | Stack Docker complète (MCP + Redis) |
-| `.env.example` | Template de configuration (à compléter) |
-| `nginx/boondmanager-mcp.conf` | Configuration nginx reverse proxy |
+**167 outils disponibles** : candidats, ressources, contacts, sociétés, opportunités, projets, factures, commandes, feuilles de temps, absences, notes de frais, et plus.
+
+**Corrections incluses dans cette version** :
+- Toutes les mises à jour (PUT) ciblent le bon endpoint `/{entité}/{id}/information`
+- Refresh automatique des tokens OAuth (reconnexion transparente)
+- Sessions persistantes 90 jours
 
 ---
 
-## Étape 1 — VPS Infomaniak
+## Informations à collecter avant de commencer
+
+Avant de démarrer, réunissez ces éléments. Vous en aurez besoin à différentes étapes.
+
+### Côté BoondManager (étape 2)
+
+| Information | Où la trouver | Exemple |
+|-------------|---------------|---------|
+| Client ID OAuth | BoondManager → Administration → Apps → Security | `abc123` |
+| Client Secret OAuth | Même page | `xyz789...` |
+| URL d'autorisation | Même page | `https://ui.boondmanager.com/api/oauth2/authorize` |
+| URL de token | Même page | `https://ui.boondmanager.com/api/oauth2/token` |
+
+### Côté Infomaniak (étapes 1 et 3)
+
+| Information | Où la trouver | Exemple |
+|-------------|---------------|---------|
+| IP du VPS | Manager Infomaniak → Cloud VPS | `185.x.x.x` |
+| Nom de domaine | Votre domaine existant | `votre-domaine.com` |
+| Sous-domaine souhaité | À choisir | `mcp.votre-domaine.com` |
+| Email admin | Le vôtre | `admin@votre-domaine.com` |
+
+---
+
+## Étape 1 — Commande et configuration du VPS Infomaniak
 
 ### 1.1 Commander le VPS
 
-1. Connectez-vous à votre espace Infomaniak : **Manager → Cloud VPS**
-2. Créer un nouveau VPS avec la configuration minimale :
-   - **OS** : Ubuntu 24.04 LTS (recommandé)
-   - **RAM** : 2 Go minimum (4 Go recommandé)
-   - **Stockage** : 20 Go
-3. Notez l'**adresse IP publique** du VPS (ex: `185.x.x.x`)
+1. Connectez-vous à **manager.infomaniak.com**
+2. Menu **Cloud VPS → Commander**
+3. Configuration minimale recommandée :
+   - OS : **Ubuntu 24.04 LTS**
+   - RAM : **2 Go** (4 Go conseillé)
+   - Stockage : **20 Go**
+4. Notez l'**adresse IP publique** du VPS (visible dans le dashboard après livraison)
 
-### 1.2 Se connecter en SSH
+### 1.2 Première connexion SSH
 
 ```bash
 ssh ubuntu@185.x.x.x
-# Remplacer 185.x.x.x par l'IP de votre VPS
+# Remplacez 185.x.x.x par l'IP réelle de votre VPS
+```
+
+Si vous avez une clé SSH différente :
+```bash
+ssh -i ~/.ssh/votre_cle ubuntu@185.x.x.x
 ```
 
 ### 1.3 Installer Docker
 
+Copiez-collez ce bloc en une seule fois :
+
 ```bash
-# Mise à jour du système
 sudo apt update && sudo apt upgrade -y
-
-# Installation Docker (méthode officielle)
 curl -fsSL https://get.docker.com | sudo sh
-
-# Ajouter votre utilisateur au groupe docker (évite sudo)
 sudo usermod -aG docker $USER
 newgrp docker
+```
 
-# Vérifier l'installation
+Vérifiez :
+```bash
 docker --version
 docker compose version
 ```
 
----
-
-## Étape 2 — DNS et sous-domaine
-
-### 2.1 Créer le sous-domaine
-
-1. Dans le Manager Infomaniak : **Domaines → votre-domaine.com → Zone DNS**
-2. Ajouter un enregistrement de type **A** :
-   - **Nom** : `mcp` (donnera `mcp.votre-domaine.com`)
-   - **Cible** : IP publique du VPS (`185.x.x.x`)
-   - **TTL** : 3600 (1 heure)
-3. Enregistrer — la propagation DNS prend **5 à 30 minutes**
-
-### 2.2 Vérifier la propagation
-
-```bash
-# Depuis votre machine locale ou le VPS
-nslookup mcp.votre-domaine.com
-# Doit retourner votre IP de VPS
-```
+Les deux commandes doivent retourner un numéro de version sans erreur.
 
 ---
 
-## Étape 3 — Configurer l'application OAuth dans BoondManager
+## Étape 2 — Créer l'application OAuth dans BoondManager
 
-> **Qui fait cette étape ?** Un administrateur BoondManager avec accès à l'Espace Développeur.
+> Cette étape nécessite un accès **Administrateur** à BoondManager.
 
-1. Dans BoondManager : **Administration → Apps → Security**
-2. Activer **OAuth2**
-3. Ajouter une **URL de redirection** :
+1. Dans BoondManager : **Administration → Apps → onglet Security**
+2. Activez **OAuth2** (toggle en haut de page)
+3. Dans **Redirect URIs**, ajoutez :
    ```
    https://mcp.votre-domaine.com/callback
    ```
-   > Note : cette URL sera aussi demandée par Claude Desktop — à confirmer avec l'éditeur du client MCP utilisé.
-4. Dans **Authorized APIs**, cocher les accès nécessaires (lecture, écriture selon les besoins)
-5. Noter les valeurs suivantes (vous en aurez besoin à l'étape 4) :
-   - **Client ID**
-   - **Client Secret**
-   - **Authorization URL** (ex: `https://ui.boondmanager.com/oauth/authorize`)
-   - **Token URL** (ex: `https://ui.boondmanager.com/oauth/token`)
+   > Remplacez `mcp.votre-domaine.com` par votre sous-domaine réel.
+4. Dans **Authorized APIs**, activez les accès nécessaires (au minimum : Lecture de toutes les ressources)
+5. **Sauvegardez** et relevez les valeurs affichées :
+
+```
+Client ID     : ___________________________
+Client Secret : ___________________________
+Auth URL      : ___________________________
+Token URL     : ___________________________
+```
+
+> **Important** : le Client Secret n'est affiché qu'une seule fois. Copiez-le immédiatement.
+
+---
+
+## Étape 3 — Configurer le DNS
+
+### 3.1 Créer l'enregistrement DNS
+
+Dans **manager.infomaniak.com → Domaines → votre-domaine.com → Zone DNS** :
+
+| Champ | Valeur |
+|-------|--------|
+| Type | `A` |
+| Nom/Hôte | `mcp` |
+| Cible/Valeur | IP du VPS (`185.x.x.x`) |
+| TTL | `3600` |
+
+### 3.2 Attendre la propagation
+
+La propagation DNS prend **5 à 30 minutes**. Vérifiez depuis n'importe quel terminal :
+
+```bash
+nslookup mcp.votre-domaine.com
+# Doit retourner l'IP de votre VPS
+```
+
+Ne passez pas à l'étape suivante tant que le DNS ne répond pas.
 
 ---
 
 ## Étape 4 — Déployer le serveur MCP
 
-### 4.1 Créer le répertoire de travail
+### 4.1 Créer le répertoire de travail (sur le VPS)
 
 ```bash
 sudo mkdir -p /opt/boondmanager-mcp
@@ -131,239 +150,18 @@ sudo chown $USER:$USER /opt/boondmanager-mcp
 cd /opt/boondmanager-mcp
 ```
 
-### 4.2 Copier les fichiers
-
-Transférez les fichiers fournis sur le VPS. Depuis votre machine locale :
+### 4.2 Créer le fichier `docker-compose.yml`
 
 ```bash
-scp docker-compose.yml ubuntu@185.x.x.x:/opt/boondmanager-mcp/
-scp .env.example ubuntu@185.x.x.x:/opt/boondmanager-mcp/
+nano docker-compose.yml
 ```
 
-Ou créez-les directement sur le VPS via copier-coller (voir section [Contenu des fichiers](#contenu-des-fichiers-de-référence)).
-
-### 4.3 Créer le fichier `.env`
-
-```bash
-cd /opt/boondmanager-mcp
-cp .env.example .env
-nano .env
-```
-
-Remplissez les valeurs :
-
-```bash
-# URL publique de votre serveur MCP (avec /mcp à la fin)
-MCP_HTTP_PUBLIC_URL=https://mcp.votre-domaine.com/mcp
-
-# Identifiants OAuth obtenus à l'étape 3
-BOOND_OAUTH_CLIENT_ID=VOTRE_CLIENT_ID
-BOOND_OAUTH_CLIENT_SECRET=VOTRE_CLIENT_SECRET
-
-# URLs OAuth BoondManager (ne pas modifier sauf instance personnalisée)
-BOOND_OAUTH_AUTH_URL=https://ui.boondmanager.com/oauth/authorize
-BOOND_OAUTH_TOKEN_URL=https://ui.boondmanager.com/oauth/token
-
-# Durée de session en jours (90 = reconnexion tous les 90 jours)
-BOOND_SESSION_TTL_DAYS=90
-```
-
-Sauvegarder avec **Ctrl+O**, quitter avec **Ctrl+X**.
-
-### 4.4 Démarrer les conteneurs
-
-```bash
-cd /opt/boondmanager-mcp
-docker compose pull
-docker compose up -d
-```
-
-### 4.5 Vérifier que tout tourne
-
-```bash
-# Statut des conteneurs
-docker compose ps
-
-# Logs du serveur MCP (Ctrl+C pour quitter)
-docker compose logs -f mcp
-```
-
-Vous devriez voir des lignes comme :
-```
-boondmanager-mcp  | {"level":"info","msg":"MCP server started","transport":"http","port":3000}
-```
-
----
-
-## Étape 5 — Configurer nginx (reverse proxy HTTPS)
-
-### 5.1 Installer nginx et certbot
-
-```bash
-sudo apt install -y nginx certbot python3-certbot-nginx
-```
-
-### 5.2 Copier la configuration nginx
-
-```bash
-sudo cp nginx/boondmanager-mcp.conf /etc/nginx/sites-available/boondmanager-mcp
-```
-
-Si vous n'avez pas le fichier fourni, créez-le :
-
-```bash
-sudo nano /etc/nginx/sites-available/boondmanager-mcp
-```
-
-Collez le contenu du fichier `nginx/boondmanager-mcp.conf` fourni en remplaçant `mcp.VOTRE-DOMAINE.com` par votre sous-domaine réel.
-
-### 5.3 Activer le site
-
-```bash
-# Remplacer mcp.votre-domaine.com par votre sous-domaine réel dans la conf d'abord
-sudo sed -i 's/mcp.VOTRE-DOMAINE.com/mcp.votre-domaine.com/g' \
-  /etc/nginx/sites-available/boondmanager-mcp
-
-# Activer le site
-sudo ln -s /etc/nginx/sites-available/boondmanager-mcp \
-           /etc/nginx/sites-enabled/
-
-# Tester la configuration
-sudo nginx -t
-
-# Recharger nginx
-sudo systemctl reload nginx
-```
-
-### 5.4 Obtenir le certificat HTTPS (Let's Encrypt)
-
-> Le DNS doit être propagé avant cette étape (vérifier avec `nslookup`).
-
-```bash
-sudo certbot --nginx \
-  -d mcp.votre-domaine.com \
-  --non-interactive \
-  --agree-tos \
-  -m admin@votre-domaine.com
-```
-
-Certbot modifie automatiquement la conf nginx pour activer TLS et met en place le renouvellement automatique.
-
-### 5.5 Vérifier HTTPS
-
-Depuis votre navigateur ou un terminal :
-
-```bash
-curl https://mcp.votre-domaine.com/.well-known/oauth-protected-resource
-```
-
-Vous devez recevoir un JSON semblable à :
-```json
-{
-  "resource": "https://mcp.votre-domaine.com/mcp",
-  "authorization_servers": ["https://ui.boondmanager.com"]
-}
-```
-
-Si vous obtenez ce JSON → **le serveur est opérationnel**.
-
----
-
-## Étape 6 — Configurer Claude Desktop ou Claude Code
-
-### Claude Desktop
-
-Ouvrez le fichier de configuration de Claude Desktop :
-- **macOS** : `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows** : `%APPDATA%\Claude\claude_desktop_config.json`
-
-Ajoutez l'entrée suivante dans `mcpServers` :
-
-```json
-{
-  "mcpServers": {
-    "boondmanager": {
-      "url": "https://mcp.votre-domaine.com/mcp",
-      "transport": "http"
-    }
-  }
-}
-```
-
-Redémarrez Claude Desktop. Au premier lancement, une fenêtre de navigateur s'ouvrira pour vous connecter à BoondManager — c'est le flow OAuth normal.
-
-### Claude Code (CLI)
-
-```bash
-claude mcp add boondmanager \
-  --transport http \
-  --url https://mcp.votre-domaine.com/mcp
-```
-
----
-
-## Maintenance
-
-### Mettre à jour le serveur MCP
-
-```bash
-cd /opt/boondmanager-mcp
-# Modifier docker-compose.yml pour bumper le tag de version si nécessaire
-docker compose pull
-docker compose up -d
-```
-
-### Consulter les logs
-
-```bash
-# Logs temps réel
-docker compose logs -f mcp
-
-# Dernières 100 lignes
-docker compose logs --tail=100 mcp
-```
-
-### Redémarrer le service
-
-```bash
-docker compose restart mcp
-```
-
-### Arrêter complètement
-
-```bash
-docker compose down
-```
-
-### Renouvellement SSL
-
-Le renouvellement Let's Encrypt est automatique via un timer systemd installé par certbot. Pour vérifier :
-```bash
-sudo certbot renew --dry-run
-```
-
----
-
-## Résolution de problèmes
-
-| Symptôme | Cause probable | Solution |
-|----------|----------------|----------|
-| `curl` vers `/.well-known/…` retourne une erreur de connexion | nginx non démarré ou port 443 bloqué | `sudo systemctl status nginx` ; vérifier le firewall (`sudo ufw status`) |
-| Conteneur MCP en état `unhealthy` | `.env` incomplet ou Redis non démarré | `docker compose logs mcp` pour les détails |
-| Erreur `401` dans Claude après connexion OAuth | Token mal transmis ou URL publique incorrecte | Vérifier que `MCP_HTTP_PUBLIC_URL` dans `.env` correspond exactement à l'URL dans la conf nginx |
-| Page blanche au lieu du JSON OAuth discovery | `proxy_buffering off` absent de nginx | Vérifier la conf nginx ; recharger avec `sudo nginx -t && sudo systemctl reload nginx` |
-| Claude affiche "Erreur de connexion MCP" | DNS pas propagé ou certificat expiré | `nslookup mcp.votre-domaine.com` ; `sudo certbot certificates` |
-
----
-
-## Contenu des fichiers de référence
-
-### `docker-compose.yml`
+Collez exactement ce contenu :
 
 ```yaml
 services:
   mcp:
-    image: ghcr.io/fauguste/boondmanager-mcp-server:2.1.0
+    image: ghcr.io/nathanguenoun-cell/mcp-boond-oauth:2.1.0
     container_name: boondmanager-mcp
     restart: unless-stopped
     ports:
@@ -377,50 +175,88 @@ services:
       MCP_HTTP_PATH: /mcp
       MCP_HTTP_STATEFUL: "false"
       MCP_HTTP_ALLOWED_HOSTS: "*"
-      REDIS_URL: "redis://redis:6379"
       NODE_ENV: production
       LOG_LEVEL: info
       LOG_FORMAT: json
-    depends_on:
-      redis:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/.well-known/oauth-protected-resource').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
-
-  redis:
-    image: redis:7-alpine
-    container_name: boondmanager-redis
-    restart: unless-stopped
-    command: redis-server --save 900 1 --save 300 10 --appendonly yes
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-volumes:
-  redis-data:
-    driver: local
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 ```
 
-### `.env` (à remplir)
+Sauvegardez : **Ctrl+O** puis **Ctrl+X**.
+
+### 4.3 Créer le fichier `.env`
 
 ```bash
+nano .env
+```
+
+Remplissez avec vos valeurs collectées à l'étape 2 et 3 :
+
+```bash
+# URL publique du serveur MCP (HTTPS, avec /mcp à la fin)
 MCP_HTTP_PUBLIC_URL=https://mcp.votre-domaine.com/mcp
-BOOND_OAUTH_CLIENT_ID=
-BOOND_OAUTH_CLIENT_SECRET=
-BOOND_OAUTH_AUTH_URL=https://ui.boondmanager.com/oauth/authorize
-BOOND_OAUTH_TOKEN_URL=https://ui.boondmanager.com/oauth/token
+
+# Identifiants OAuth BoondManager (étape 2)
+BOOND_OAUTH_CLIENT_ID=VOTRE_CLIENT_ID
+BOOND_OAUTH_CLIENT_SECRET=VOTRE_CLIENT_SECRET
+
+# URLs OAuth BoondManager
+BOOND_OAUTH_AUTH_URL=https://ui.boondmanager.com/api/oauth2/authorize
+BOOND_OAUTH_TOKEN_URL=https://ui.boondmanager.com/api/oauth2/token
+
+# Durée des sessions (jours)
 BOOND_SESSION_TTL_DAYS=90
 ```
 
-### `nginx/boondmanager-mcp.conf`
+Sauvegardez : **Ctrl+O** puis **Ctrl+X**.
+
+> **Sécurité** : le fichier `.env` contient des secrets. Ne le partagez jamais et ne le commitez pas dans git.
+
+### 4.4 Démarrer le conteneur
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+### 4.5 Vérifier le démarrage
+
+```bash
+docker compose ps
+```
+
+Le statut doit afficher `running (healthy)` après 30 secondes. Si ce n'est pas le cas :
+
+```bash
+docker compose logs mcp
+```
+
+---
+
+## Étape 5 — Configurer nginx (reverse proxy HTTPS)
+
+### 5.1 Installer nginx et certbot
+
+```bash
+sudo apt install -y nginx certbot python3-certbot-nginx
+```
+
+### 5.2 Créer la configuration nginx
+
+```bash
+sudo nano /etc/nginx/sites-available/boondmanager-mcp
+```
+
+Collez ce contenu en remplaçant `mcp.votre-domaine.com` par votre sous-domaine :
 
 ```nginx
 limit_req_zone $binary_remote_addr zone=mcp_limit:10m rate=10r/s;
@@ -448,6 +284,8 @@ server {
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
+
+        # Critique pour le streaming SSE (MCP utilise Server-Sent Events)
         proxy_buffering off;
         proxy_cache off;
         add_header X-Accel-Buffering "no" always;
@@ -472,19 +310,199 @@ server {
 }
 ```
 
+Sauvegardez : **Ctrl+O** puis **Ctrl+X**.
+
+### 5.3 Activer le site
+
+```bash
+sudo ln -s /etc/nginx/sites-available/boondmanager-mcp /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+La commande `nginx -t` doit afficher `syntax is ok` et `test is successful`.
+
+### 5.4 Obtenir le certificat HTTPS
+
+> Le DNS doit être propagé (étape 3.2) avant cette commande.
+
+```bash
+sudo certbot --nginx \
+  -d mcp.votre-domaine.com \
+  --non-interactive \
+  --agree-tos \
+  -m admin@votre-domaine.com
+```
+
+Certbot configure automatiquement TLS et programme le renouvellement automatique.
+
 ---
 
-## Checklist finale
+## Étape 6 — Vérification du déploiement
 
-- [ ] VPS Infomaniak commandé et accessible en SSH
+### Test 1 — Endpoint de découverte OAuth
+
+```bash
+curl https://mcp.votre-domaine.com/.well-known/oauth-protected-resource
+```
+
+Réponse attendue :
+```json
+{
+  "resource": "https://mcp.votre-domaine.com/mcp",
+  "authorization_servers": ["https://ui.boondmanager.com"]
+}
+```
+
+### Test 2 — Endpoint MCP
+
+```bash
+curl -X POST https://mcp.votre-domaine.com/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+```
+
+Réponse attendue : un JSON avec `"result"` contenant les capabilities du serveur.
+
+Si les deux tests passent, le serveur est opérationnel.
+
+---
+
+## Étape 7 — Configurer Claude
+
+### Claude Desktop
+
+Ouvrez le fichier de configuration :
+- **macOS** : `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows** : `%APPDATA%\Claude\claude_desktop_config.json`
+
+Ajoutez dans la section `mcpServers` :
+
+```json
+{
+  "mcpServers": {
+    "boondmanager": {
+      "url": "https://mcp.votre-domaine.com/mcp",
+      "transport": "http"
+    }
+  }
+}
+```
+
+Redémarrez Claude Desktop. Une fenêtre de navigateur s'ouvre pour la connexion BoondManager — c'est normal, c'est le flow OAuth.
+
+### Claude Code (terminal)
+
+```bash
+claude mcp add boondmanager \
+  --transport http \
+  --url https://mcp.votre-domaine.com/mcp
+```
+
+---
+
+## Maintenance
+
+### Consulter les logs
+
+```bash
+cd /opt/boondmanager-mcp
+docker compose logs -f mcp          # Temps réel
+docker compose logs --tail=100 mcp  # 100 dernières lignes
+```
+
+### Redémarrer le service
+
+```bash
+cd /opt/boondmanager-mcp
+docker compose restart mcp
+```
+
+### Mettre à jour vers une nouvelle version
+
+```bash
+cd /opt/boondmanager-mcp
+# Modifier l'image dans docker-compose.yml pour bumper le tag
+nano docker-compose.yml
+# Remplacer :2.1.0 par le nouveau tag
+
+docker compose pull
+docker compose up -d
+```
+
+### Vérifier le renouvellement SSL
+
+```bash
+sudo certbot renew --dry-run
+```
+
+---
+
+## Résolution des problèmes courants
+
+| Symptôme | Cause | Solution |
+|----------|-------|----------|
+| `curl` sur `/.well-known/…` échoue | nginx non démarré ou firewall | `sudo systemctl status nginx` ; `sudo ufw status` |
+| Conteneur en état `unhealthy` | `.env` mal rempli | `docker compose logs mcp` pour voir l'erreur |
+| Page blanche dans Claude, pas de connexion | `MCP_HTTP_PUBLIC_URL` incorrect | Vérifier que l'URL dans `.env` correspond exactement au domaine nginx |
+| Erreur `401` après connexion OAuth | Token rejeté par BoondManager | Re-autoriser l'application dans BoondManager |
+| `nslookup` ne retourne pas la bonne IP | DNS pas propagé | Attendre 30 min et réessayer |
+| `certbot` échoue avec "no valid domain" | DNS pas encore propagé | Attendre la propagation DNS puis relancer |
+| Streaming bloqué / timeout dans Claude | `proxy_buffering` manquant dans nginx | Vérifier la présence de `proxy_buffering off` dans la config nginx |
+
+---
+
+## Validation des corrections PUT (v2.1.0)
+
+Cette version corrige les endpoints de mise à jour. Voici les chemins utilisés par chaque outil :
+
+| Outil MCP | Endpoint PUT |
+|-----------|-------------|
+| `boond_candidates_update` | `PUT /candidates/{id}/information` ✅ |
+| `boond_resources_update` | `PUT /resources/{id}/information` ✅ |
+| `boond_contacts_update` | `PUT /contacts/{id}/information` ✅ |
+| `boond_companies_update` | `PUT /companies/{id}/information` ✅ |
+| `boond_opportunities_update` | `PUT /opportunities/{id}/information` ✅ |
+| `boond_projects_update` | `PUT /projects/{id}/information` ✅ |
+| `boond_invoices_update` | `PUT /invoices/{id}/information` ✅ |
+| `boond_orders_update` | `PUT /orders/{id}/information` ✅ |
+| `boond_absences_reports_update` | `PUT /absences-reports/{id}/information` ✅ |
+| `boond_expenses_reports_update` | `PUT /expenses-reports/{id}/information` ✅ |
+
+---
+
+## Checklist de déploiement
+
+Cochez chaque étape au fur et à mesure :
+
+**Préparation**
+- [ ] IP du VPS Infomaniak notée
+- [ ] Sous-domaine décidé (ex: `mcp.votre-domaine.com`)
+- [ ] Client ID BoondManager OAuth noté
+- [ ] Client Secret BoondManager OAuth noté (une seule chance !)
+- [ ] URLs Auth et Token BoondManager notées
+
+**Infrastructure**
+- [ ] VPS commandé et accessible en SSH
 - [ ] Docker installé (`docker --version` OK)
-- [ ] Sous-domaine DNS créé et propagé (`nslookup` retourne l'IP du VPS)
-- [ ] Application OAuth créée dans BoondManager (Client ID + Secret notés)
-- [ ] Fichier `.env` complété dans `/opt/boondmanager-mcp/`
-- [ ] `docker compose up -d` → 2 conteneurs `running`
-- [ ] nginx installé et configuration en place
+- [ ] Enregistrement DNS A créé
+- [ ] DNS propagé (`nslookup mcp.votre-domaine.com` retourne l'IP du VPS)
+
+**Déploiement**
+- [ ] Dossier `/opt/boondmanager-mcp` créé
+- [ ] `docker-compose.yml` créé
+- [ ] `.env` rempli avec les vraies valeurs
+- [ ] `docker compose up -d` → conteneur `running (healthy)`
+
+**HTTPS**
+- [ ] nginx installé
+- [ ] Configuration nginx créée avec le bon domaine
+- [ ] `nginx -t` → `syntax is ok`
 - [ ] Certificat Let's Encrypt obtenu
-- [ ] `curl https://mcp.votre-domaine.com/.well-known/oauth-protected-resource` retourne du JSON
+
+**Validation**
+- [ ] `curl /.well-known/oauth-protected-resource` → JSON avec `resource` et `authorization_servers`
+- [ ] `curl -X POST /mcp` → réponse JSON avec capabilities
 - [ ] Claude Desktop/Code configuré avec l'URL du serveur
-- [ ] Connexion OAuth testée (navigateur s'ouvre, connexion à BoondManager réussie)
-- [ ] Premier outil testé dans Claude (ex: "Liste les 5 dernières opportunités dans BoondManager")
+- [ ] Connexion OAuth testée (navigateur s'ouvre, connexion BoondManager réussie)
+- [ ] Premier test en langage naturel réussi (ex: "Liste les 5 dernières opportunités")
