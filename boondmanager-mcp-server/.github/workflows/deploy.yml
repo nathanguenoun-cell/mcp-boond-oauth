@@ -34,8 +34,8 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/nathanwesype/boondmanager-mcp-server:2.1.0
-            ghcr.io/nathanwesype/boondmanager-mcp-server:latest
+            ghcr.io/nathanguenoun-cell/mcp-boond-oauth:2.1.0
+            ghcr.io/nathanguenoun-cell/mcp-boond-oauth:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -43,6 +43,9 @@ jobs:
     name: SSH deploy → VPS
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     concurrency:
       group: production-deploy
       cancel-in-progress: false

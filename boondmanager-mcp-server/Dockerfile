@@ -44,7 +44,7 @@ LABEL org.opencontainers.image.title="boondmanager-mcp-server" \
       org.opencontainers.image.description="MCP server for the BoondManager API (HTTP gateway mode, OAuth2 protected resource)" \
       org.opencontainers.image.source="https://github.com/nathanguenoun-cell/mcp-boond-oauth" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.vendor="nathanwesype"
+      org.opencontainers.image.vendor="nathanguenoun-cell"
 
 # Run unprivileged. node:alpine ships a uid 1000 `node` user we can reuse.
 USER node
