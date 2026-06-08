@@ -28,11 +28,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: |
             ghcr.io/nathanguenoun-cell/mcp-boond-oauth:2.1.0
             ghcr.io/nathanguenoun-cell/mcp-boond-oauth:latest
