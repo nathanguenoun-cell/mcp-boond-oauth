@@ -107,7 +107,7 @@ Returns: Liste des bons de commande correspondants.`,
     async (params) => {
       const { id, ...attrs } = params;
       const body = buildJsonApiBody("order", attrs, id);
-      const response = await apiRequest(`/orders/${id}`, "PUT", body);
+      const response = await apiRequest(`/orders/${id}/information`, "PUT", body);
       return {
         content: [{
           type: "text" as const,

@@ -108,7 +108,7 @@ Returns: Liste des notes de frais correspondantes.`,
     async (params) => {
       const { id, ...attrs } = params;
       const body = buildJsonApiBody("expense", attrs, id);
-      const response = await apiRequest(`/expenses-reports/${id}`, "PUT", body);
+      const response = await apiRequest(`/expenses-reports/${id}/information`, "PUT", body);
       return {
         content: [{
           type: "text" as const,

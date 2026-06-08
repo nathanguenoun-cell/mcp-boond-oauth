@@ -126,10 +126,11 @@ export function registerOpportunityTools(server: McpServer): void {
     return body;
   });
 
-  registerUpdateTool(server, OPTS, OpportunityUpdateSchema, (params) => {
-    const { id, ...attrs } = params;
-    return buildJsonApiBody("opportunity", attrs, id as string);
-  });
+  registerUpdateTool(
+    server, OPTS, OpportunityUpdateSchema,
+    (params) => { const { id, ...attrs } = params; return buildJsonApiBody("opportunity", attrs, id as string); },
+    (id, apiPath) => `${apiPath}/${id}/information`
+  );
 
   registerDeleteTool(server, OPTS);
 

@@ -107,7 +107,7 @@ Returns: Liste des absences correspondantes.`,
     async (params) => {
       const { id, ...attrs } = params;
       const body = buildJsonApiBody("absence", attrs, id);
-      const response = await apiRequest(`/absences-reports/${id}`, "PUT", body);
+      const response = await apiRequest(`/absences-reports/${id}/information`, "PUT", body);
       return {
         content: [{
           type: "text" as const,

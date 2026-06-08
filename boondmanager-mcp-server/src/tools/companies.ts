@@ -164,10 +164,11 @@ export function registerCompanyTools(server: McpServer): void {
     return buildJsonApiBody("company", attrs);
   });
 
-  registerUpdateTool(server, OPTS, CompanyUpdateSchema, (params) => {
-    const { id, ...attrs } = params;
-    return buildJsonApiBody("company", attrs, id as string);
-  });
+  registerUpdateTool(
+    server, OPTS, CompanyUpdateSchema,
+    (params) => { const { id, ...attrs } = params; return buildJsonApiBody("company", attrs, id as string); },
+    (id, apiPath) => `${apiPath}/${id}/information`
+  );
 
   registerDeleteTool(server, OPTS);
 

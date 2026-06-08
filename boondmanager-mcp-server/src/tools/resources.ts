@@ -336,10 +336,11 @@ export function registerResourceTools(server: McpServer): void {
     return buildJsonApiBody("resource", attrs);
   });
 
-  registerUpdateTool(server, OPTS, ResourceUpdateSchema, (params) => {
-    const { id, ...attrs } = params;
-    return buildJsonApiBody("resource", attrs, id as string);
-  });
+  registerUpdateTool(
+    server, OPTS, ResourceUpdateSchema,
+    (params) => { const { id, ...attrs } = params; return buildJsonApiBody("resource", attrs, id as string); },
+    (id, apiPath) => `${apiPath}/${id}/information`
+  );
 
   registerDeleteTool(server, OPTS);
 

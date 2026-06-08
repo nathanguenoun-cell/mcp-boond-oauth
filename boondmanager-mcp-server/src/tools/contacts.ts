@@ -137,10 +137,11 @@ export function registerContactTools(server: McpServer): void {
     return body;
   });
 
-  registerUpdateTool(server, OPTS, ContactUpdateSchema, (params) => {
-    const { id, ...attrs } = params;
-    return buildJsonApiBody("contact", attrs, id as string);
-  });
+  registerUpdateTool(
+    server, OPTS, ContactUpdateSchema,
+    (params) => { const { id, ...attrs } = params; return buildJsonApiBody("contact", attrs, id as string); },
+    (id, apiPath) => `${apiPath}/${id}/information`
+  );
 
   registerDeleteTool(server, OPTS);
 

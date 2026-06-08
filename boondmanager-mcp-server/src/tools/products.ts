@@ -25,10 +25,11 @@ export function registerProductTools(server: McpServer): void {
     return buildJsonApiBody("product", attrs);
   });
 
-  registerUpdateTool(server, OPTS, ProductUpdateSchema, (params) => {
-    const { id, ...attrs } = params;
-    return buildJsonApiBody("product", attrs, id as string);
-  });
+  registerUpdateTool(
+    server, OPTS, ProductUpdateSchema,
+    (params) => { const { id, ...attrs } = params; return buildJsonApiBody("product", attrs, id as string); },
+    (id, apiPath) => `${apiPath}/${id}/information`
+  );
 
   registerDeleteTool(server, OPTS);
 }
