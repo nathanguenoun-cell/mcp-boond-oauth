@@ -25,7 +25,7 @@
 
 services:
   mcp:
-    image: ghcr.io/fauguste/boondmanager-mcp-server:2.1.0
+    image: ghcr.io/nathanwesype/boondmanager-mcp-server:2.1.0
     container_name: boondmanager-mcp
     restart: unless-stopped
     ports:

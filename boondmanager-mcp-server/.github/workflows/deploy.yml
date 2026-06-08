@@ -1,18 +1,51 @@
-name: Deploy to Infomaniak VPS
+name: Build & Deploy to Infomaniak VPS
 
 on:
   push:
     branches: [main]
-  # Déclenchement manuel — utile pour rollbacks ou redeploys forcés
   workflow_dispatch:
 
 jobs:
+  build:
+    name: Build & push Docker image → GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/nathanwesype/boondmanager-mcp-server:2.1.0
+            ghcr.io/nathanwesype/boondmanager-mcp-server:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   deploy:
     name: SSH deploy → VPS
+    needs: build
     runs-on: ubuntu-latest
     concurrency:
       group: production-deploy
-      cancel-in-progress: false   # ne jamais interrompre un déploiement en cours
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -31,13 +64,22 @@ jobs:
           scp docker-compose.yml \
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/boondmanager-mcp/docker-compose.yml
 
+      - name: Authenticate VPS to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          ssh "$VPS_USER@$VPS_HOST" \
+            "echo '$GHCR_TOKEN' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+
       - name: Deploy on VPS
         run: |
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} 'bash -s' << 'ENDSSH'
           set -euo pipefail
           cd /opt/boondmanager-mcp
 
-          # Pull la nouvelle image MCP (Redis est en local, pas de pull nécessaire)
+          # Pull la nouvelle image (Redis est en local, pas de pull nécessaire)
           docker compose pull mcp
 
           # Démarrer/redémarrer les conteneurs

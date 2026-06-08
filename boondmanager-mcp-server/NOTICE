@@ -1,8 +1,12 @@
-BoondManager MCP Server
+BoondManager MCP Server — fork maintained by nathanwesype
+Copyright 2025 nathanwesype
+
+This product is a fork of the original BoondManager MCP Server
+by Frédéric Auguste (https://github.com/fauguste/boondmanager-mcp-server).
 Copyright 2025 Frédéric Auguste
 
-This product includes software developed by Frédéric Auguste
-and contributors to the BoondManager MCP Server project.
+Modifications by nathanwesype include: OAuth2 session management,
+Infomaniak VPS deployment, BoondManager token refresh, and endpoint fixes.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
