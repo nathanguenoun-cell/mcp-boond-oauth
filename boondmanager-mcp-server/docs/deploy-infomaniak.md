@@ -9,7 +9,7 @@
 
 ## Ce que vous allez obtenir
 
-Un serveur MCP BoondManager accessible en HTTPS depuis Claude Desktop ou Claude Code, permettant d'interroger et modifier vos données BoondManager en langage naturel.
+Un serveur MCP BoondManager accessible en HTTPS depuis **Dust**, permettant d'interroger et modifier vos données BoondManager en langage naturel.
 
 **167 outils disponibles** : candidats, ressources, contacts, sociétés, opportunités, projets, factures, commandes, feuilles de temps, absences, notes de frais, et plus.
 
@@ -97,9 +97,9 @@ Les deux commandes doivent retourner un numéro de version sans erreur.
 2. Activez **OAuth2** (toggle en haut de page)
 3. Dans **Redirect URIs**, ajoutez :
    ```
-   https://mcp.votre-domaine.com/callback
+   https://mcp.votre-domaine.com/auth/callback
    ```
-   > Remplacez `mcp.votre-domaine.com` par votre sous-domaine réel.
+   > Remplacez `mcp.votre-domaine.com` par votre sous-domaine réel. Le serveur MCP gère lui-même le callback OAuth à ce chemin.
 4. Dans **Authorized APIs**, activez les accès nécessaires (au minimum : Lecture de toutes les ressources)
 5. **Sauvegardez** et relevez les valeurs affichées :
 
@@ -368,36 +368,24 @@ Si les deux tests passent, le serveur est opérationnel.
 
 ---
 
-## Étape 7 — Configurer Claude
+## Étape 7 — Configurer Dust
 
-### Claude Desktop
+### Ajouter le serveur MCP dans Dust
 
-Ouvrez le fichier de configuration :
-- **macOS** : `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows** : `%APPDATA%\Claude\claude_desktop_config.json`
+1. Connectez-vous à votre espace Dust : **app.dust.tt**
+2. Allez dans **Settings → MCP Servers** (ou **Connexions → Serveurs MCP** selon la langue)
+3. Cliquez sur **Add MCP Server**
+4. Renseignez les champs :
+   - **Name** : `BoondManager`
+   - **URL** : `https://mcp.votre-domaine.com/mcp`
+   - **Transport** : `HTTP` (Streamable HTTP)
+5. Sauvegardez
 
-Ajoutez dans la section `mcpServers` :
+### Connexion OAuth
 
-```json
-{
-  "mcpServers": {
-    "boondmanager": {
-      "url": "https://mcp.votre-domaine.com/mcp",
-      "transport": "http"
-    }
-  }
-}
-```
+Au premier usage dans un assistant Dust, une fenêtre de navigateur s'ouvre automatiquement pour vous connecter à BoondManager — c'est le flow OAuth normal. Connectez-vous avec votre compte BoondManager habituel et autorisez l'application.
 
-Redémarrez Claude Desktop. Une fenêtre de navigateur s'ouvre pour la connexion BoondManager — c'est normal, c'est le flow OAuth.
-
-### Claude Code (terminal)
-
-```bash
-claude mcp add boondmanager \
-  --transport http \
-  --url https://mcp.votre-domaine.com/mcp
-```
+La connexion est ensuite mémorisée pour 90 jours (configurable via `BOOND_SESSION_TTL_DAYS` dans le `.env`).
 
 ---
 
@@ -438,71 +426,3 @@ sudo certbot renew --dry-run
 
 ---
 
-## Résolution des problèmes courants
-
-| Symptôme | Cause | Solution |
-|----------|-------|----------|
-| `curl` sur `/.well-known/…` échoue | nginx non démarré ou firewall | `sudo systemctl status nginx` ; `sudo ufw status` |
-| Conteneur en état `unhealthy` | `.env` mal rempli | `docker compose logs mcp` pour voir l'erreur |
-| Page blanche dans Claude, pas de connexion | `MCP_HTTP_PUBLIC_URL` incorrect | Vérifier que l'URL dans `.env` correspond exactement au domaine nginx |
-| Erreur `401` après connexion OAuth | Token rejeté par BoondManager | Re-autoriser l'application dans BoondManager |
-| `nslookup` ne retourne pas la bonne IP | DNS pas propagé | Attendre 30 min et réessayer |
-| `certbot` échoue avec "no valid domain" | DNS pas encore propagé | Attendre la propagation DNS puis relancer |
-| Streaming bloqué / timeout dans Claude | `proxy_buffering` manquant dans nginx | Vérifier la présence de `proxy_buffering off` dans la config nginx |
-
----
-
-## Validation des corrections PUT (v2.1.0)
-
-Cette version corrige les endpoints de mise à jour. Voici les chemins utilisés par chaque outil :
-
-| Outil MCP | Endpoint PUT |
-|-----------|-------------|
-| `boond_candidates_update` | `PUT /candidates/{id}/information` ✅ |
-| `boond_resources_update` | `PUT /resources/{id}/information` ✅ |
-| `boond_contacts_update` | `PUT /contacts/{id}/information` ✅ |
-| `boond_companies_update` | `PUT /companies/{id}/information` ✅ |
-| `boond_opportunities_update` | `PUT /opportunities/{id}/information` ✅ |
-| `boond_projects_update` | `PUT /projects/{id}/information` ✅ |
-| `boond_invoices_update` | `PUT /invoices/{id}/information` ✅ |
-| `boond_orders_update` | `PUT /orders/{id}/information` ✅ |
-| `boond_absences_reports_update` | `PUT /absences-reports/{id}/information` ✅ |
-| `boond_expenses_reports_update` | `PUT /expenses-reports/{id}/information` ✅ |
-
----
-
-## Checklist de déploiement
-
-Cochez chaque étape au fur et à mesure :
-
-**Préparation**
-- [ ] IP du VPS Infomaniak notée
-- [ ] Sous-domaine décidé (ex: `mcp.votre-domaine.com`)
-- [ ] Client ID BoondManager OAuth noté
-- [ ] Client Secret BoondManager OAuth noté (une seule chance !)
-- [ ] URLs Auth et Token BoondManager notées
-
-**Infrastructure**
-- [ ] VPS commandé et accessible en SSH
-- [ ] Docker installé (`docker --version` OK)
-- [ ] Enregistrement DNS A créé
-- [ ] DNS propagé (`nslookup mcp.votre-domaine.com` retourne l'IP du VPS)
-
-**Déploiement**
-- [ ] Dossier `/opt/boondmanager-mcp` créé
-- [ ] `docker-compose.yml` créé
-- [ ] `.env` rempli avec les vraies valeurs
-- [ ] `docker compose up -d` → conteneur `running (healthy)`
-
-**HTTPS**
-- [ ] nginx installé
-- [ ] Configuration nginx créée avec le bon domaine
-- [ ] `nginx -t` → `syntax is ok`
-- [ ] Certificat Let's Encrypt obtenu
-
-**Validation**
-- [ ] `curl /.well-known/oauth-protected-resource` → JSON avec `resource` et `authorization_servers`
-- [ ] `curl -X POST /mcp` → réponse JSON avec capabilities
-- [ ] Claude Desktop/Code configuré avec l'URL du serveur
-- [ ] Connexion OAuth testée (navigateur s'ouvre, connexion BoondManager réussie)
-- [ ] Premier test en langage naturel réussi (ex: "Liste les 5 dernières opportunités")
