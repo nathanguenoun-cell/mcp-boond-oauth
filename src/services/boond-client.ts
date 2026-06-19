@@ -323,7 +323,7 @@ export function resolveRateLimitConfig(): RateLimitConfig | null {
 let rateLimiter: TokenBucket | null = null;
 let rateLimiterInitialised = false;
 
-function getRateLimiter(): TokenBucket | null {
+export function getRateLimiter(): TokenBucket | null {
   if (rateLimiterInitialised) return rateLimiter;
   const config = resolveRateLimitConfig();
   rateLimiter = config ? new TokenBucket(config.burst, config.rps) : null;
@@ -554,6 +554,40 @@ export async function apiRequest(
 
   // Defensive — the loop always returns or throws. If somehow exhausted:
   throw lastError ?? new Error("BoondManager API request exhausted retries with no recorded error.");
+}
+
+export async function apiRequestBinary(
+  path: string,
+  queryParams?: Record<string, string>
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  const { baseUrl, auth } = getConfig();
+  const url = new URL(`${baseUrl}${path}`);
+
+  if (queryParams) {
+    for (const [key, value] of Object.entries(queryParams)) {
+      url.searchParams.set(key, value);
+    }
+  }
+
+  const timeoutMs = resolveTimeoutMs();
+  const limiter = getRateLimiter();
+  if (limiter) await limiter.acquire();
+
+  const authHeader = await auth();
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: { [authHeader.name]: authHeader.value },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(formatApiError(response.status, response.statusText, "GET", path, errorText));
+  }
+
+  const mimeType = response.headers.get("content-type") ?? "application/octet-stream";
+  const arrayBuffer = await response.arrayBuffer();
+  return { buffer: Buffer.from(arrayBuffer), mimeType };
 }
 
 export function buildSearchQuery(params: SearchParams): Record<string, QueryValue> {

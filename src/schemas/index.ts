@@ -1226,3 +1226,12 @@ export type ResourceTechnicalDataUpdateInput = z.infer<typeof ResourceTechnicalD
 export type ReferenceCreateInput = z.infer<typeof ReferenceCreateSchema>;
 export type ReferenceUpdateInput = z.infer<typeof ReferenceUpdateSchema>;
 export type ReferenceIdInput = z.infer<typeof ReferenceIdSchema>;
+
+export const CandidateDownloadSchema = z
+  .object({
+    id: z.string().describe("Identifiant unique du candidat"),
+    language: z.enum(["fr", "en", "es"]).optional().describe("Langue du document généré"),
+    template: z.string().optional().describe("ID du template à utiliser"),
+  })
+  .strict();
+export type CandidateDownloadInput = z.infer<typeof CandidateDownloadSchema>;
