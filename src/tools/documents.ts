@@ -79,17 +79,29 @@ Returns: Confirmation d'upload avec l'identifiant du fichier Dust (sId).`,
 
       const { file } = (await initRes.json()) as { file: { sId: string; uploadUrl: string } };
 
-      // Step 3: upload the binary to the signed URL (multipart/form-data, no auth header)
-      const form = new FormData();
-      form.append("file", new Blob([new Uint8Array(buffer)], { type: mimeType }), fileName);
-      const uploadRes = await fetch(file.uploadUrl, {
-        method: "POST",
-        body: form,
-      });
+      // Step 3: upload the binary to the signed URL
+      const uploadUrl = new URL(file.uploadUrl);
+      const isDustUrl = uploadUrl.hostname.endsWith("dust.tt");
+
+      const uploadRes = isDustUrl
+        ? await fetch(file.uploadUrl, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${dustApiKey}` },
+            body: (() => {
+              const form = new FormData();
+              form.append("file", new Blob([new Uint8Array(buffer)], { type: mimeType }), fileName);
+              return form;
+            })(),
+          })
+        : await fetch(file.uploadUrl, {
+            method: "PUT",
+            headers: { "Content-Type": mimeType },
+            body: new Uint8Array(buffer),
+          });
 
       if (!uploadRes.ok) {
         const uploadBody = await uploadRes.text().catch(() => "");
-        throw new Error(`Upload du fichier échoué (${uploadRes.status}): ${uploadBody}`);
+        throw new Error(`Upload du fichier échoué (${uploadRes.status}) sur ${uploadUrl.hostname}: ${uploadBody}`);
       }
 
       return {
