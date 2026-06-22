@@ -82,12 +82,16 @@ Returns: Confirmation d'upload avec l'identifiant du fichier Dust (sId).`,
       // Step 3: upload the binary to the provided URL
       const uploadRes = await fetch(file.uploadUrl, {
         method: "PUT",
-        headers: { "Content-Type": mimeType },
+        headers: {
+          "Content-Type": mimeType,
+          Authorization: `Bearer ${dustApiKey}`,
+        },
         body: new Uint8Array(buffer),
       });
 
       if (!uploadRes.ok) {
-        throw new Error(`Upload du fichier échoué (${uploadRes.status})`);
+        const uploadBody = await uploadRes.text().catch(() => "");
+        throw new Error(`Upload du fichier échoué (${uploadRes.status}): ${uploadBody}`);
       }
 
       return {
