@@ -119,6 +119,11 @@ export function resetClientForTests(): void {
   config = null;
 }
 
+export function getBaseUrl(): string {
+  if (!config) initClient();
+  return config!.baseUrl;
+}
+
 function getConfig(): BoondConfig {
   if (!config) {
     initClient();
