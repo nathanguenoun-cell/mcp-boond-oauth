@@ -1,12 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import {
-  CandidateCreateSchema,
-  CandidateUpdateSchema,
-  CandidateSearchSchema,
-  IdSchema,
-  CandidateDownloadSchema,
-} from "../schemas/index.js";
-import type { IdInput, CandidateDownloadInput } from "../schemas/index.js";
+import { CandidateCreateSchema, CandidateUpdateSchema, CandidateSearchSchema, IdSchema } from "../schemas/index.js";
+import type { IdInput } from "../schemas/index.js";
 import {
   registerSearchTool,
   registerGetTool,
@@ -15,7 +9,7 @@ import {
   registerDeleteTool,
   buildJsonApiBody,
 } from "./crud-factory.js";
-import { apiRequest, apiRequestBinary, formatDetailResponse } from "../services/boond-client.js";
+import { apiRequest, formatDetailResponse } from "../services/boond-client.js";
 
 const OPTS = {
   entityName: "candidat",
@@ -132,52 +126,6 @@ export function registerCandidateTools(server: McpServer): void {
   });
 
   registerDeleteTool(server, OPTS);
-
-  server.registerTool(
-    "boond_candidates_download",
-    {
-      title: "Télécharger le document d'un candidat",
-      description: `Télécharge le fichier CV/document d'un candidat (PDF ou Word).
-
-Args:
-  - id (string): ID du candidat
-  - language (fr|en|es, optionnel): Langue du document généré
-  - template (string, optionnel): ID du template à utiliser
-
-Returns: Fichier binaire encodé en base64 (blob).`,
-      inputSchema: CandidateDownloadSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-    },
-    async (params: CandidateDownloadInput) => {
-      const { id, language, template } = params;
-      const queryParams: Record<string, string> = {};
-      if (language) queryParams["language"] = language;
-      if (template) queryParams["template"] = template;
-
-      const { buffer, mimeType } = await apiRequestBinary(
-        `/candidates/${id}/download`,
-        Object.keys(queryParams).length > 0 ? queryParams : undefined
-      );
-
-      return {
-        content: [
-          {
-            type: "resource" as const,
-            resource: {
-              uri: `boond://candidates/${id}/download`,
-              mimeType,
-              blob: buffer.toString("base64"),
-            },
-          },
-        ],
-      };
-    }
-  );
 
   // Register one tool per candidate tab
   for (const tab of CANDIDATE_TABS) {
