@@ -79,14 +79,12 @@ Returns: Confirmation d'upload avec l'identifiant du fichier Dust (sId).`,
 
       const { file } = (await initRes.json()) as { file: { sId: string; uploadUrl: string } };
 
-      // Step 3: upload the binary to the provided URL
+      // Step 3: upload the binary to the signed URL (multipart/form-data, no auth header)
+      const form = new FormData();
+      form.append("file", new Blob([new Uint8Array(buffer)], { type: mimeType }), fileName);
       const uploadRes = await fetch(file.uploadUrl, {
-        method: "PUT",
-        headers: {
-          "Content-Type": mimeType,
-          Authorization: `Bearer ${dustApiKey}`,
-        },
-        body: new Uint8Array(buffer),
+        method: "POST",
+        body: form,
       });
 
       if (!uploadRes.ok) {
