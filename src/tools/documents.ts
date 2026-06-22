@@ -66,7 +66,7 @@ Returns: Confirmation d'upload avec l'identifiant du fichier Dust (sId).`,
           fileName,
           fileSize: buffer.byteLength,
           useCase: "conversation",
-          useCaseMetadata: JSON.stringify({ conversationId }),
+          useCaseMetadata: { conversationId },
         }),
       });
 
