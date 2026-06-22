@@ -1226,3 +1226,15 @@ export type ResourceTechnicalDataUpdateInput = z.infer<typeof ResourceTechnicalD
 export type ReferenceCreateInput = z.infer<typeof ReferenceCreateSchema>;
 export type ReferenceUpdateInput = z.infer<typeof ReferenceUpdateSchema>;
 export type ReferenceIdInput = z.infer<typeof ReferenceIdSchema>;
+
+export const DocumentDownloadSchema = z
+  .object({
+    id: z.string().describe("Identifiant unique du document BoondManager"),
+    conversationId: z
+      .string()
+      .describe(
+        "Identifiant de la conversation Dust (dernier segment de l'URL, ex: dust.tt/w/.../conversations/sO6afuY1mo → sO6afuY1mo)"
+      ),
+  })
+  .strict();
+export type DocumentDownloadInput = z.infer<typeof DocumentDownloadSchema>;

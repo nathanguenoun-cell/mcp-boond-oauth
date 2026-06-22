@@ -24,11 +24,19 @@ describe("registerDocumentTools", () => {
     expect(names).toContain("boond_documents_download");
   });
 
-  it("should register the tool as readOnly", () => {
+  it("should register the tool as readOnly and non-destructive", () => {
     registerDocumentTools(server);
     for (const call of vi.mocked(server.registerTool).mock.calls) {
       expect(call[1].annotations?.readOnlyHint).toBe(true);
       expect(call[1].annotations?.destructiveHint).toBe(false);
     }
+  });
+
+  it("should use a schema with id and conversationId", () => {
+    registerDocumentTools(server);
+    const [, metadata] = vi.mocked(server.registerTool).mock.calls[0];
+    const schema = metadata.inputSchema as { shape?: Record<string, unknown> };
+    expect(schema.shape).toHaveProperty("id");
+    expect(schema.shape).toHaveProperty("conversationId");
   });
 });

@@ -1,39 +1,98 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { IdSchema } from "../schemas/index.js";
-import type { IdInput } from "../schemas/index.js";
-import { getBaseUrl } from "../services/boond-client.js";
+import { DocumentDownloadSchema } from "../schemas/index.js";
+import type { DocumentDownloadInput } from "../schemas/index.js";
+import { apiRequestBinary } from "../services/boond-client.js";
+
+const MIME_TO_EXT: Record<string, string> = {
+  "application/pdf": ".pdf",
+  "application/msword": ".doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+  "application/vnd.ms-excel": ".xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "text/plain": ".txt",
+};
 
 export function registerDocumentTools(server: McpServer): void {
   server.registerTool(
     "boond_documents_download",
     {
-      title: "Obtenir le lien de téléchargement d'un document",
-      description: `Retourne l'URL authentifiée pour télécharger le contenu d'un document BoondManager.
+      title: "Télécharger un document dans la conversation Dust",
+      description: `Télécharge un document BoondManager et l'attache directement à la conversation Dust via l'API Dust.
 
-L'URL retournée est l'endpoint REST direct du document. Elle nécessite un header d'authentification
-pour être utilisée (Authorization: Bearer <token> ou X-Jwt-Client-Boondmanager: <jwt>).
+Le fichier devient disponible comme pièce jointe dans la conversation, accessible aux agents pour lecture et traitement.
+
+Prérequis : variables d'environnement DUST_API_KEY et DUST_WORKSPACE_ID configurées sur le serveur MCP.
 
 Args:
-  - id (string): Identifiant unique du document
+  - id (string): Identifiant unique du document BoondManager
+  - conversationId (string): Identifiant de la conversation Dust (dernier segment de l'URL)
 
-Returns: URL de téléchargement du document et instructions d'utilisation.`,
-      inputSchema: IdSchema,
+Returns: Confirmation d'upload avec l'identifiant du fichier Dust (sId).`,
+      inputSchema: DocumentDownloadSchema,
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
-        idempotentHint: true,
+        idempotentHint: false,
         openWorldHint: false,
       },
     },
-    (params: IdInput) => {
-      const { id } = params;
-      const url = `${getBaseUrl()}/documents/${id}`;
+    async (params: DocumentDownloadInput) => {
+      const { id, conversationId } = params;
+
+      const dustApiKey = process.env["DUST_API_KEY"];
+      const dustWorkspaceId = process.env["DUST_WORKSPACE_ID"];
+      if (!dustApiKey || !dustWorkspaceId) {
+        throw new Error(
+          "Variables d'environnement manquantes : DUST_API_KEY et DUST_WORKSPACE_ID sont requis pour l'upload Dust."
+        );
+      }
+
+      // Step 1: fetch binary from BoondManager
+      const { buffer, mimeType, filename } = await apiRequestBinary(`/documents/${id}`);
+      const ext = MIME_TO_EXT[mimeType.split(";")[0].trim()] ?? ".bin";
+      const fileName = filename ?? `document-${id}${ext}`;
+
+      // Step 2: request an upload URL from Dust
+      const initRes = await fetch(`https://dust.tt/api/v1/w/${dustWorkspaceId}/files`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${dustApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contentType: mimeType,
+          fileName,
+          fileSize: buffer.byteLength,
+          useCase: "conversation",
+          useCaseMetadata: JSON.stringify({ conversationId }),
+        }),
+      });
+
+      if (!initRes.ok) {
+        const body = await initRes.text().catch(() => "");
+        throw new Error(`Dust file init échoué (${initRes.status}): ${body}`);
+      }
+
+      const { file } = (await initRes.json()) as { file: { sId: string; uploadUrl: string } };
+
+      // Step 3: upload the binary to the provided URL
+      const uploadRes = await fetch(file.uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Type": mimeType },
+        body: new Uint8Array(buffer),
+      });
+
+      if (!uploadRes.ok) {
+        throw new Error(`Upload du fichier échoué (${uploadRes.status})`);
+      }
 
       return {
         content: [
           {
             type: "text" as const,
-            text: `URL de téléchargement du document ${id} :\n${url}\n\nCette URL nécessite un header d'authentification BoondManager pour être utilisée.`,
+            text: `Document "${fileName}" uploadé avec succès dans la conversation Dust.\nIdentifiant fichier Dust : ${file.sId}\nLe fichier est maintenant disponible comme pièce jointe dans cette conversation.`,
           },
         ],
       };

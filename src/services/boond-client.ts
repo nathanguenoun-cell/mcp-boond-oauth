@@ -564,7 +564,7 @@ export async function apiRequest(
 export async function apiRequestBinary(
   path: string,
   queryParams?: Record<string, string>
-): Promise<{ buffer: Buffer; mimeType: string }> {
+): Promise<{ buffer: Buffer; mimeType: string; filename?: string }> {
   const { baseUrl, auth } = getConfig();
   const url = new URL(`${baseUrl}${path}`);
 
@@ -591,8 +591,10 @@ export async function apiRequestBinary(
   }
 
   const mimeType = response.headers.get("content-type") ?? "application/octet-stream";
+  const contentDisposition = response.headers.get("content-disposition") ?? "";
+  const filename = contentDisposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)["']?/i)?.[1];
   const arrayBuffer = await response.arrayBuffer();
-  return { buffer: Buffer.from(arrayBuffer), mimeType };
+  return { buffer: Buffer.from(arrayBuffer), mimeType, filename };
 }
 
 export function buildSearchQuery(params: SearchParams): Record<string, QueryValue> {
