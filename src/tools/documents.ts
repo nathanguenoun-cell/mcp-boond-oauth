@@ -72,7 +72,9 @@ Returns: Confirmation d'upload avec l'identifiant du fichier Dust (sId).`,
 
       if (!initRes.ok) {
         const body = await initRes.text().catch(() => "");
-        throw new Error(`Dust file init échoué (${initRes.status}): ${body}`);
+        throw new Error(
+          `Dust file init échoué (${initRes.status}) — workspace: ${dustWorkspaceId}, clé: ${dustApiKey.slice(0, 8)}…\n${body}`
+        );
       }
 
       const { file } = (await initRes.json()) as { file: { sId: string; uploadUrl: string } };
