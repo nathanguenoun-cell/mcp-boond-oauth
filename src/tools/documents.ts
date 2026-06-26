@@ -43,6 +43,7 @@ Returns: Confirmation d'upload avec l'identifiant du fichier Dust (sId).`,
 
       const dustApiKey = process.env["DUST_API_KEY"];
       const dustWorkspaceId = process.env["DUST_WORKSPACE_ID"];
+      const dustBaseUrl = process.env["DUST_BASE_URL"] ?? "https://dust.tt";
       if (!dustApiKey || !dustWorkspaceId) {
         throw new Error(
           "Variables d'environnement manquantes : DUST_API_KEY et DUST_WORKSPACE_ID sont requis pour l'upload Dust."
@@ -55,7 +56,7 @@ Returns: Confirmation d'upload avec l'identifiant du fichier Dust (sId).`,
       const fileName = filename ?? `document-${id}${ext}`;
 
       // Step 2: request an upload URL from Dust
-      const initRes = await fetch(`https://dust.tt/api/v1/w/${dustWorkspaceId}/files`, {
+      const initRes = await fetch(`${dustBaseUrl}/api/v1/w/${dustWorkspaceId}/files`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${dustApiKey}`,
