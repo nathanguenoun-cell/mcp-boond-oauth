@@ -45,7 +45,8 @@ src/
 │   └── http.ts           # startHttpTransport() + resolveHttpOptions() — MCP Streamable HTTP server
 ├── services/
 │   ├── boond-client.ts   # HTTP client: apiRequest(), buildSearchQuery(), formatListResponse(), formatDetailResponse(), parseBoondErrorBody(), formatApiError(); initClient() (stdio) / initClientWithAuth() (OAuth); oauthContextAuth (reads AsyncLocalStorage)
-│   ├── oauth.ts          # OAuth2 protected-resource plumbing for the HTTP transport: oauthContext (AsyncLocalStorage), extractBearerToken(), buildProtectedResourceMetadata() (RFC 9728). No state, no client_secret.
+│   ├── oauth.ts          # OAuth2 plumbing for the HTTP transport: oauthContext (AsyncLocalStorage), extractBearerToken(), buildProtectedResourceMetadata() (RFC 9728).
+│   ├── oauth-state.ts    # In-memory OAuth token store for the HTTP authorization-server proxy: registered clients, auth codes, shared BoondManager credential sets (credId), access/refresh tokens, transparent-refresh helpers. Not persisted — cleared on restart.
 │   ├── rate-limiter.ts   # Token-bucket rate limiter for BoondManager API
 │   └── logger.ts         # Structured logger (pino) + generateCorrelationId()
 ├── schemas/
@@ -303,7 +304,7 @@ are what the client surfaces.
 The server selects its transport from `MCP_TRANSPORT`:
 
 - **`stdio`** (default): wraps `StdioServerTransport`, used by Claude Desktop / Claude Code locally. Auth: JWT (X-Jwt-Client-Boondmanager) or BasicAuth via env vars.
-- **`http`** (alias: `streamable-http`): starts a Node HTTP server using `StreamableHTTPServerTransport` from the MCP SDK. Intended for MCP gateways and remote deployments. **Auth: OAuth2 protected resource** — the server holds no tokens; each MCP request must carry `Authorization: Bearer <boond_access_token>` and is forwarded verbatim to BoondManager. See the *Authentication → http transport* section below.
+- **`http`** (alias: `streamable-http`): starts a Node HTTP server using `StreamableHTTPServerTransport` from the MCP SDK. Intended for MCP gateways and remote deployments (e.g. Dust). **Auth: OAuth2 authorization-server proxy** — the server runs DCR + `/authorize` + `/token`, keeps a token store mapping each MCP-client token to a BoondManager credential set, and refreshes the BoondManager token transparently. See the *Authentication → http transport* section below.
 
 HTTP env vars (see `src/transports/http.ts::resolveHttpOptions`):
 
@@ -325,8 +326,8 @@ Stateless mode spins up a fresh `McpServer`+`StreamableHTTPServerTransport` per 
 
 Two distinct models depending on the transport — **stdio** uses the
 existing env-based credentials (single identity, integrator-side);
-**http** is an **OAuth2 protected resource** (multi-tenant, per-user,
-per-request).
+**http** is an **OAuth2 authorization-server proxy** in front of BoondManager
+(multi-tenant, per-user), with a token store and transparent token refresh.
 
 ### stdio transport (env-based, priority order)
 
@@ -340,48 +341,78 @@ per-request).
 
 JWT travels in `X-Jwt-Client-Boondmanager`, BasicAuth in `Authorization`.
 
-### http transport (OAuth2 — protected resource model)
+### http transport (OAuth2 — authorization-server proxy)
 
-The HTTP server is an **OAuth2 protected resource** (per the MCP
-Authorization 2025-06-18 spec and RFC 9728). It holds **no OAuth state**:
-no `client_secret`, no refresh token, no per-user storage. The flow:
+The HTTP server is an **OAuth2 authorization-server proxy** in front of
+BoondManager (not a bare protected resource). It implements Dynamic Client
+Registration (RFC 7591), an `/authorize` endpoint that redirects to
+BoondManager, an `/auth/callback` that exchanges the Boond code, and a
+`/token` endpoint that issues the MCP client its own access/refresh tokens.
+This lets MCP clients (Dust, Claude Desktop, …) that can't be pre-registered
+in BoondManager still complete a standard OAuth flow against *this* server.
 
-1. The MCP client (Claude Desktop, Claude Code, gateway, …) initiates
-   the OAuth dance against BoondManager directly. The user grants
-   consent to the BoondManager App in their browser; the client receives
-   an `access_token` and a `refresh_token`.
-2. On every MCP request the client sends
-   `Authorization: Bearer <access_token>`.
-3. The HTTP transport (`src/transports/http.ts`) extracts the Bearer
-   token before dispatching to the SDK's `StreamableHTTPServerTransport`,
-   wraps the handler in `oauthContext.run({ accessToken }, …)`.
-4. When a tool fires an API call, `oauthContextAuth` in `boond-client.ts`
-   reads the token out of the AsyncLocalStorage context and forwards it
-   verbatim to BoondManager as `Authorization: Bearer <access_token>`.
-5. The MCP client refreshes its own tokens — the server never sees the
-   refresh flow.
+The proxy maps each MCP-client token to a **shared BoondManager credential
+set** (`credId`) held in a small token store (`src/services/oauth-state.ts`).
+The flow:
+
+1. The MCP client does DCR (`POST /register`) and starts the auth-code flow
+   against the proxy's `/authorize`. The proxy redirects the user to
+   BoondManager (`BOOND_OAUTH_*`), then `/auth/callback` exchanges the code
+   for a BoondManager `access_token` **and `refresh_token`** (both stored).
+2. `/token` (grant `authorization_code`) issues the MCP client its own
+   `access_token` + `refresh_token` (advertised `expires_in` = 3600 s), each
+   pointing at the shared `credId`.
+3. On every MCP request the client sends `Authorization: Bearer <our token>`.
+   The transport resolves it to the BoondManager token, and — if that Boond
+   token is at/near expiry — **transparently refreshes it** via the Boond
+   `refresh_token` grant before serving the request (`refreshBoondCredentials`
+   in `http.ts`). The fresh token is written back to the shared `credId`, so
+   the connection never dies silently mid-session.
+4. The MCP client silently renews its own token via `/token` (grant
+   `refresh_token`, which rotates the refresh token). It does **not** need to
+   redo the interactive consent until its refresh token is revoked/expired.
+5. If a Boond token is expired and its refresh fails, the credential set is
+   revoked and the request gets a **401 + `WWW-Authenticate`** so the client
+   re-runs OAuth cleanly (instead of every tool call failing silently).
+
+> Historical note: earlier docs described a stateless "pass the client's Boond
+> token through verbatim, no server state" model. That is no longer accurate —
+> the server keeps a token store and handles refresh. The discarded-refresh-token
+> bug in the old design was the root cause of Dust connections dropping and
+> needing a full admin re-login (≈ hourly / on every restart).
 
 Discovery: the server publishes RFC 9728 protected-resource metadata at
-`/.well-known/oauth-protected-resource` (and at the path-suffixed variant
-`/.well-known/oauth-protected-resource{MCP_HTTP_PATH}` per RFC 9728 §3.2).
-Missing/invalid Bearer tokens get a 401 with
-`WWW-Authenticate: Bearer realm="…", resource_metadata="…"` pointing at
-that endpoint. MCP-spec-compliant clients use this to auto-discover the
-BoondManager authorization server.
+`/.well-known/oauth-protected-resource` (+ the path-suffixed variant per
+RFC 9728 §3.2) and RFC 8414 authorization-server metadata at
+`/.well-known/oauth-authorization-server` (advertising the
+`authorization_code` **and `refresh_token`** grants). Missing/invalid Bearer
+tokens get a 401 with `WWW-Authenticate: Bearer realm="…", resource_metadata="…"`.
 
-Env vars for the HTTP path (all optional — only `MCP_HTTP_PUBLIC_URL`
-really matters in production):
+**State footprint:** the token store is **in-memory only** (no disk artifact,
+no new env var). A process restart clears it and clients re-authenticate —
+same as before this fix. The fix targets the *frequent/silent* disconnects
+(mid-session token expiry), not restarts. The only field now retained that
+wasn't before is the BoondManager refresh token (previously discarded), which
+is what makes transparent refresh possible.
+
+Env vars for the HTTP path (the `BOOND_OAUTH_*` vars below are **pre-existing**
+— the proxy has always needed them; this fix adds none):
 
 | Var | Purpose |
 |-----|---------|
-| `MCP_HTTP_PUBLIC_URL` | Public URL advertised as the OAuth2 resource identifier (and in the `realm` of the 401 challenge). Required when fronted by a reverse proxy. Defaults to `http://<host>:<port><path>`. |
-| `BOOND_OAUTH_AUTHORIZATION_SERVER` | Issuer URL of the BoondManager authorization server, advertised in `authorization_servers`. Defaults to `https://ui.boondmanager.com`. |
-| `BOOND_OAUTH_SCOPES` | Space/comma-separated scope hints advertised in `scopes_supported`. Empty = clients negotiate directly with Boond. |
+| `MCP_HTTP_PUBLIC_URL` | Public URL advertised as the OAuth2 resource identifier (and `realm` of the 401 challenge). Required behind a reverse proxy. Defaults to `http://<host>:<port><path>`. |
+| `BOOND_OAUTH_CLIENT_ID` / `BOOND_OAUTH_CLIENT_SECRET` | Credentials of the BoondManager OAuth app the proxy uses for the code exchange and token refresh. |
+| `BOOND_OAUTH_AUTH_URL` / `BOOND_OAUTH_TOKEN_URL` | BoondManager authorize/token endpoints. Default `https://ui.boondmanager.com/oauth/{authorize,token}`. |
+| `BOOND_OAUTH_REDIRECT_URI` | Proxy callback registered with the Boond app. Defaults to `<baseUrl>/auth/callback`. |
+| `BOOND_OAUTH_AUTHORIZATION_SERVER` | Issuer URL advertised in `authorization_servers`. Defaults to `https://ui.boondmanager.com`. |
+| `BOOND_OAUTH_SCOPES` | Space/comma-separated scope hints advertised in `scopes_supported`. |
 
-Implementation: `src/services/oauth.ts` (AsyncLocalStorage context,
-header parsing, metadata builder), `src/transports/http.ts` (Bearer
-extraction + discovery endpoint + 401 challenge), `src/services/boond-client.ts`
-(`oauthContextAuth` provider). Full setup guide: `docs/oauth.md`.
+Implementation: `src/services/oauth.ts` (AsyncLocalStorage context, header
+parsing, metadata builder), `src/services/oauth-state.ts` (in-memory token
+store, credential model, refresh-token grant), `src/transports/http.ts`
+(DCR + `/authorize` + `/auth/callback` + `/token` + transparent Boond refresh
++ 401 challenge), `src/services/boond-client.ts` (`oauthContextAuth` provider).
+Full setup guide: `docs/oauth.md`.
 - `BOOND_BASE_URL` (optional, defaults to `https://ui.boondmanager.com/api`)
 - `BOOND_HTTP_TIMEOUT_MS` (optional, defaults to `30000`) — per-request timeout for the BoondManager HTTP client. Non-numeric / non-positive values fall back to the default. A timeout surfaces as an `Error` whose message includes the configured value and the failing endpoint.
 - `BOOND_HTTP_MAX_RETRIES` (optional, defaults to `2`) — number of additional attempts after the first failure. Set to `0` to disable retries. Retry policy: GET retries on 5xx / 429 / network / timeout; non-GET retries only on 429 (idempotency safety). `Retry-After` is honoured.

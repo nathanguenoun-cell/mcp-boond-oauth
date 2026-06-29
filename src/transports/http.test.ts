@@ -1,8 +1,29 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { request as httpRequest } from "node:http";
 import { resolveAllowedHosts, resolveHttpOptions, startHttpTransport, type HttpServerHandle } from "./http.js";
-import { seedTokenPairForTesting } from "../services/oauth-state.js";
+import {
+  createCredentials,
+  getCredentials,
+  getRefreshToken,
+  registerClient,
+  seedTokenPairForTesting,
+  storeAccessToken,
+  storeRefreshToken,
+} from "../services/oauth-state.js";
 import { createMcpServer } from "../server.js";
+
+const BOOND_TOKEN_URL = "https://ui.boondmanager.com/oauth/token";
+
+const INITIALIZE_BODY = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 1,
+  method: "initialize",
+  params: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "vitest", version: "1.0.0" },
+  },
+});
 
 /**
  * Performs a low-level HTTP POST so we can override the Host header (which
@@ -323,7 +344,7 @@ describe("startHttpTransport (integration)", () => {
     const doc = (await res.json()) as Record<string, unknown>;
     expect(typeof doc["client_id"]).toBe("string");
     expect(typeof doc["client_secret"]).toBe("string");
-    expect(doc["grant_types"]).toEqual(["authorization_code"]);
+    expect(doc["grant_types"]).toEqual(["authorization_code", "refresh_token"]);
   });
 
   it("rejects requests with a Host header outside the allow-list", async () => {
@@ -446,5 +467,199 @@ describe("startHttpTransport (integration)", () => {
       body: "{}",
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("startHttpTransport — refresh_token grant", () => {
+  let handle: HttpServerHandle | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.close();
+    handle = undefined;
+  });
+
+  it("issues a rotated access/refresh pair and invalidates the old refresh token", async () => {
+    registerClient({
+      clientId: "dust-rt-client",
+      clientSecret: "dust-rt-secret",
+      redirectUris: ["https://dust.tt/cb"],
+      clientName: "Dust",
+    });
+    const credId = createCredentials({
+      boondToken: "boond-rt",
+      boondRefreshToken: "",
+      boondExpiresAt: 0,
+      clientId: "dust-rt-client",
+    });
+    storeRefreshToken("dust-refresh-old", credId);
+
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34590,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+    });
+
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: "dust-refresh-old",
+        client_id: "dust-rt-client",
+        client_secret: "dust-rt-secret",
+      }).toString(),
+    });
+
+    expect(res.status).toBe(200);
+    const doc = (await res.json()) as Record<string, string>;
+    expect(typeof doc["access_token"]).toBe("string");
+    expect(typeof doc["refresh_token"]).toBe("string");
+    expect(doc["refresh_token"]).not.toBe("dust-refresh-old");
+    expect(doc["expires_in"]).toBe(3600);
+
+    // Old refresh token is rotated out; new one still resolves to the same creds.
+    expect(getRefreshToken("dust-refresh-old")).toBeUndefined();
+    expect(getRefreshToken(doc["refresh_token"])?.boondToken).toBe("boond-rt");
+  });
+
+  it("rejects a refresh_token grant with a bad client secret", async () => {
+    registerClient({
+      clientId: "dust-rt-client-2",
+      clientSecret: "right-secret",
+      redirectUris: [],
+      clientName: "Dust",
+    });
+    const credId = createCredentials({
+      boondToken: "x",
+      boondRefreshToken: "",
+      boondExpiresAt: 0,
+      clientId: "dust-rt-client-2",
+    });
+    storeRefreshToken("dust-refresh-2", credId);
+
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34591,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+    });
+
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: "dust-refresh-2",
+        client_id: "dust-rt-client-2",
+        client_secret: "WRONG",
+      }).toString(),
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("startHttpTransport — transparent BoondManager token refresh", () => {
+  let handle: HttpServerHandle | undefined;
+  const realFetch = globalThis.fetch;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    globalThis.fetch = realFetch;
+    if (handle) await handle.close();
+    handle = undefined;
+  });
+
+  it("refreshes an expiring BoondManager token before serving the request", async () => {
+    const credId = createCredentials({
+      boondToken: "stale-boond",
+      boondRefreshToken: "boond-refresh-good",
+      boondExpiresAt: Date.now() - 1000, // already expired
+      clientId: "_test_",
+    });
+    storeAccessToken("near-expiry-access", credId);
+
+    let refreshCalled = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === BOOND_TOKEN_URL) {
+        refreshCalled = true;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "fresh-boond", refresh_token: "fresh-refresh", expires_in: 3600 }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }
+          )
+        );
+      }
+      return realFetch(input as RequestInfo, init);
+    });
+
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34592,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+    });
+
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: "Bearer near-expiry-access",
+      },
+      body: INITIALIZE_BODY,
+    });
+
+    expect(res.status).toBe(200);
+    expect(refreshCalled).toBe(true);
+    expect(getCredentials(credId)?.boondToken).toBe("fresh-boond");
+  });
+
+  it("forces re-auth (401) when an expired token cannot be refreshed", async () => {
+    const credId = createCredentials({
+      boondToken: "dead-boond",
+      boondRefreshToken: "boond-refresh-bad",
+      boondExpiresAt: Date.now() - 1000,
+      clientId: "_test_",
+    });
+    storeAccessToken("dead-access", credId);
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === BOOND_TOKEN_URL) {
+        return Promise.resolve(new Response("nope", { status: 400 }));
+      }
+      return realFetch(input as RequestInfo, init);
+    });
+
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: 34593,
+      path: "/mcp",
+      stateless: true,
+      enableJsonResponse: true,
+    });
+
+    const res = await fetch(`http://127.0.0.1:${handle.address.port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: "Bearer dead-access",
+      },
+      body: INITIALIZE_BODY,
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate") ?? "").toMatch(/^Bearer /);
+    // The dead credential set is revoked so the client re-authenticates cleanly.
+    expect(getCredentials(credId)).toBeUndefined();
   });
 });

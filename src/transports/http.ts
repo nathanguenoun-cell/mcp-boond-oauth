@@ -4,17 +4,24 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { logger, generateCorrelationId } from "../services/logger.js";
 import { buildProtectedResourceMetadata, extractBearerToken, oauthContext } from "../services/oauth.js";
 import {
+  createCredentials,
   deleteAuthCode,
   deletePendingAuth,
+  deleteRefreshToken,
   generateToken,
   getAccessToken,
   getAuthCode,
+  getCredentials,
   getPendingAuth,
+  getRefreshToken,
   getRegisteredClient,
   registerClient,
+  revokeCredentials,
   storeAccessToken,
   storeAuthCode,
   storePendingAuth,
+  storeRefreshToken,
+  updateCredentials,
   verifyPKCE,
 } from "../services/oauth-state.js";
 
@@ -46,6 +53,18 @@ export interface HttpServerHandle {
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const LOCALHOST_ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+
+/** Advertised lifetime of the Dust-facing access token (seconds). Dust silently
+ *  refreshes via the refresh_token grant before this elapses. */
+const PROXY_ACCESS_TOKEN_TTL_S = 3600;
+/** Refresh the BoondManager token this many ms before it actually expires. */
+const BOOND_REFRESH_SKEW_MS = 60_000;
+
+/** Convert an OAuth `expires_in` (seconds) to an absolute epoch-ms deadline. */
+function expiresInToEpochMs(expiresIn: unknown): number {
+  const n = Number(expiresIn);
+  return Number.isFinite(n) && n > 0 ? Date.now() + n * 1000 : 0;
+}
 
 function readEnv(key: string): string | undefined {
   const v = process.env[key];
@@ -219,6 +238,40 @@ export async function startHttpTransport(
   const boondTokenUrl = readEnv("BOOND_OAUTH_TOKEN_URL") ?? "https://ui.boondmanager.com/oauth/token";
   const boondRedirectUri = readEnv("BOOND_OAUTH_REDIRECT_URI") ?? `${baseUrl}/auth/callback`;
 
+  /**
+   * Refresh a BoondManager credential set in place using its refresh token.
+   * Returns true on success (the shared credentials are updated, so every
+   * access/refresh handle pointing at the same credId sees the new token).
+   */
+  async function refreshBoondCredentials(credId: string, refreshToken: string): Promise<boolean> {
+    if (!refreshToken) return false;
+    try {
+      const res = await fetch(boondTokenUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: boondClientId,
+          client_secret: boondClientSecret,
+          refresh_token: refreshToken,
+        }).toString(),
+      });
+      if (!res.ok) return false;
+      const data = (await res.json()) as Record<string, unknown>;
+      const newAccess = data["access_token"] as string | undefined;
+      if (!newAccess) return false;
+      updateCredentials(credId, {
+        boondToken: newAccess,
+        // Boond may rotate the refresh token; fall back to the old one if not.
+        boondRefreshToken: (data["refresh_token"] as string | undefined) ?? refreshToken,
+        boondExpiresAt: expiresInToEpochMs(data["expires_in"]),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   const httpServer = createServer(async (req, res) => {
     const corrId = generateCorrelationId();
     const reqLogger = logger.child({ corrId, method: req.method, path: req.url });
@@ -280,7 +333,7 @@ export async function startHttpTransport(
             token_endpoint: `${baseUrl}/token`,
             registration_endpoint: `${baseUrl}/register`,
             response_types_supported: ["code"],
-            grant_types_supported: ["authorization_code"],
+            grant_types_supported: ["authorization_code", "refresh_token"],
             code_challenge_methods_supported: ["S256", "plain"],
             token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
           },
@@ -308,7 +361,7 @@ export async function startHttpTransport(
             redirect_uris: redirectUris,
             client_name: clientName,
             client_id_issued_at: Math.floor(Date.now() / 1000),
-            grant_types: ["authorization_code"],
+            grant_types: ["authorization_code", "refresh_token"],
             response_types: ["code"],
             token_endpoint_auth_method: "client_secret_post",
           },
@@ -412,6 +465,11 @@ export async function startHttpTransport(
             codeChallenge: pending.codeChallenge,
             codeChallengeMethod: pending.codeChallengeMethod,
             boondToken,
+            // Capture the refresh token + expiry so the server can keep the
+            // BoondManager session alive transparently instead of dying
+            // silently when the access token expires.
+            boondRefreshToken: (tokenData["refresh_token"] as string | undefined) ?? "",
+            boondExpiresAt: expiresInToEpochMs(tokenData["expires_in"]),
             createdAt: Date.now(),
           });
 
@@ -423,14 +481,51 @@ export async function startHttpTransport(
         return;
       }
 
-      // ── Token endpoint: exchange our auth code → our access token ─────────
+      // ── Token endpoint: authorization_code + refresh_token grants ─────────
       if (req.method === "POST" && pathname === "/token") {
         const ct = req.headers["content-type"] ?? "";
         const body = ct.includes("application/x-www-form-urlencoded")
           ? await readUrlEncodedBody(req)
           : (((await readJsonBody(req)) as Record<string, string> | undefined) ?? {});
 
-        const { grant_type, code, client_id, client_secret, code_verifier } = body;
+        const { grant_type, code, client_id, client_secret, code_verifier, refresh_token } = body;
+
+        // Mint a fresh access/refresh token pair both pointing at the same
+        // shared BoondManager credential set (credId).
+        const issueTokenPair = (credId: string): void => {
+          const accessToken = generateToken();
+          const newRefreshToken = generateToken();
+          storeAccessToken(accessToken, credId);
+          storeRefreshToken(newRefreshToken, credId);
+          writeJson(
+            res,
+            200,
+            {
+              access_token: accessToken,
+              refresh_token: newRefreshToken,
+              token_type: "Bearer",
+              expires_in: PROXY_ACCESS_TOKEN_TTL_S,
+            },
+            CORS_HEADERS
+          );
+        };
+
+        if (grant_type === "refresh_token") {
+          const registeredClient = getRegisteredClient(client_id ?? "");
+          if (!registeredClient || registeredClient.clientSecret !== client_secret) {
+            writeJson(res, 401, { error: "invalid_client" }, CORS_HEADERS);
+            return;
+          }
+          const stored = getRefreshToken(refresh_token ?? "");
+          if (!stored || stored.clientId !== client_id) {
+            writeJson(res, 400, { error: "invalid_grant" }, CORS_HEADERS);
+            return;
+          }
+          // Rotate the refresh token (RFC 6749 §10.4 best practice).
+          deleteRefreshToken(refresh_token ?? "");
+          issueTokenPair(stored.credId);
+          return;
+        }
 
         if (grant_type !== "authorization_code") {
           writeJson(res, 400, { error: "unsupported_grant_type" }, CORS_HEADERS);
@@ -467,23 +562,13 @@ export async function startHttpTransport(
           }
         }
 
-        const accessToken = generateToken();
-        storeAccessToken(accessToken, {
+        const credId = createCredentials({
           boondToken: storedCode.boondToken,
+          boondRefreshToken: storedCode.boondRefreshToken,
+          boondExpiresAt: storedCode.boondExpiresAt,
           clientId: client_id ?? "",
-          createdAt: Date.now(),
         });
-
-        writeJson(
-          res,
-          200,
-          {
-            access_token: accessToken,
-            token_type: "Bearer",
-            expires_in: 3600,
-          },
-          CORS_HEADERS
-        );
+        issueTokenPair(credId);
         return;
       }
 
@@ -513,8 +598,31 @@ export async function startHttpTransport(
         return;
       }
 
+      // Keep the BoondManager session alive: if its access token is at/near
+      // expiry, refresh it transparently before serving the request. If the
+      // token is already expired and the refresh fails, force a clean re-auth
+      // (401 + challenge) instead of letting every tool call fail silently.
+      let boondToken = tokenData.boondToken;
+      const needsRefresh =
+        tokenData.boondExpiresAt > 0 && tokenData.boondExpiresAt - Date.now() <= BOOND_REFRESH_SKEW_MS;
+      if (needsRefresh) {
+        const refreshed = await refreshBoondCredentials(tokenData.credId, tokenData.boondRefreshToken);
+        if (refreshed) {
+          boondToken = getCredentials(tokenData.credId)?.boondToken ?? boondToken;
+        } else if (tokenData.boondExpiresAt <= Date.now()) {
+          revokeCredentials(tokenData.credId);
+          writeOAuthError(
+            res,
+            401,
+            wwwAuthenticate,
+            "BoondManager session expired and could not be refreshed. Re-authenticate."
+          );
+          return;
+        }
+      }
+
       // Map our token → BoondManager token and inject into the per-request context.
-      await oauthContext.run({ accessToken: tokenData.boondToken }, async () => {
+      await oauthContext.run({ accessToken: boondToken }, async () => {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: undefined,
           enableJsonResponse: options.enableJsonResponse,
