@@ -8,9 +8,11 @@ import {
   DEFAULT_HTTP_RETRY_MAX_MS,
   DEFAULT_HTTP_RATE_LIMIT_RPS,
   DEFAULT_HTTP_RATE_LIMIT_BURST,
+  DEFAULT_HTTP_MAX_CONCURRENCY,
 } from "../constants.js";
 import type { BoondAuthProvider, BoondConfig, JsonApiResponse, SearchParams } from "../types.js";
 import { TokenBucket } from "./rate-limiter.js";
+import { Semaphore } from "./concurrency-limiter.js";
 import { oauthContext } from "./oauth.js";
 
 let config: BoondConfig | null = null;
@@ -345,6 +347,38 @@ export function resetRateLimiterForTests(): void {
   rateLimiterInitialised = false;
 }
 
+/**
+ * Resolve the max-concurrency cap from env. Returns null (no cap) when the
+ * value is 0, unset-and-defaulted-to-0, non-numeric, or negative. Exported for
+ * unit testing.
+ */
+export function resolveMaxConcurrency(): number | null {
+  const raw = envOrUndefined("BOOND_HTTP_MAX_CONCURRENCY");
+  const value = raw === undefined ? DEFAULT_HTTP_MAX_CONCURRENCY : Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.floor(value);
+}
+
+let concurrencyLimiter: Semaphore | null = null;
+let concurrencyLimiterInitialised = false;
+
+export function getConcurrencyLimiter(): Semaphore | null {
+  if (concurrencyLimiterInitialised) return concurrencyLimiter;
+  const cap = resolveMaxConcurrency();
+  concurrencyLimiter = cap ? new Semaphore(cap) : null;
+  concurrencyLimiterInitialised = true;
+  return concurrencyLimiter;
+}
+
+/**
+ * Reset the cached concurrency limiter so the next request re-reads env vars.
+ * Intended for tests that toggle `BOOND_HTTP_MAX_CONCURRENCY` between cases.
+ */
+export function resetConcurrencyLimiterForTests(): void {
+  concurrencyLimiter = null;
+  concurrencyLimiterInitialised = false;
+}
+
 /** Status-specific hint to help the LLM (or human) recover from common failures. */
 function hintForStatus(status: number): string {
   switch (status) {
@@ -468,97 +502,107 @@ export async function apiRequest(
 
   const limiter = getRateLimiter();
 
-  for (let attempt = 0; attempt < totalAttempts; attempt++) {
-    // Acquire a token before each attempt so retries also count toward the
-    // rate budget — this is what actually protects us from feedback loops
-    // (transient 5xx → retry → transient 5xx → …) saturating the API.
-    if (limiter) await limiter.acquire();
+  // Acquire a concurrency slot for the *whole* operation (all retry attempts of
+  // this request share one slot), so a wide parallel salvo is capped at N calls
+  // in flight rather than stampeding the API. Released in the finally below.
+  const semaphore = getConcurrencyLimiter();
+  const release = semaphore ? await semaphore.acquire() : null;
 
-    // Resolve the auth header per-attempt so OAuth2 refreshes are picked
-    // up between retries (the access token may have expired since the
-    // previous attempt).
-    const authHeader = await auth();
-    const headers: Record<string, string> = {
-      [authHeader.name]: authHeader.value,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    };
+  try {
+    for (let attempt = 0; attempt < totalAttempts; attempt++) {
+      // Acquire a token before each attempt so retries also count toward the
+      // rate budget — this is what actually protects us from feedback loops
+      // (transient 5xx → retry → transient 5xx → …) saturating the API.
+      if (limiter) await limiter.acquire();
 
-    const fetchOptions: RequestInit = {
-      method,
-      headers,
-      // Each attempt gets its own abort signal — once a signal has fired it
-      // can't be reused for the next try.
-      signal: AbortSignal.timeout(timeoutMs),
-    };
-    if (serializedBody !== undefined) {
-      fetchOptions.body = serializedBody;
-    }
+      // Resolve the auth header per-attempt so OAuth2 refreshes are picked
+      // up between retries (the access token may have expired since the
+      // previous attempt).
+      const authHeader = await auth();
+      const headers: Record<string, string> = {
+        [authHeader.name]: authHeader.value,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      };
 
-    let response: Response | undefined;
-    let networkError: Error | undefined;
+      const fetchOptions: RequestInit = {
+        method,
+        headers,
+        // Each attempt gets its own abort signal — once a signal has fired it
+        // can't be reused for the next try.
+        signal: AbortSignal.timeout(timeoutMs),
+      };
+      if (serializedBody !== undefined) {
+        fetchOptions.body = serializedBody;
+      }
 
-    try {
-      response = await fetch(url.toString(), fetchOptions);
-    } catch (err) {
-      if (isAbortError(err)) {
-        networkError = new Error(
-          [
-            `BoondManager API request timed out after ${timeoutMs}ms`,
-            `Endpoint: ${method} ${path}`,
-            "Hint: Increase BOOND_HTTP_TIMEOUT_MS or check connectivity to the BoondManager API.",
-          ].join("\n"),
-          { cause: err }
-        );
+      let response: Response | undefined;
+      let networkError: Error | undefined;
+
+      try {
+        response = await fetch(url.toString(), fetchOptions);
+      } catch (err) {
+        if (isAbortError(err)) {
+          networkError = new Error(
+            [
+              `BoondManager API request timed out after ${timeoutMs}ms`,
+              `Endpoint: ${method} ${path}`,
+              "Hint: Increase BOOND_HTTP_TIMEOUT_MS or check connectivity to the BoondManager API.",
+            ].join("\n"),
+            { cause: err }
+          );
+        } else {
+          networkError = err instanceof Error ? err : new Error(String(err));
+        }
+      }
+
+      if (response && response.ok) {
+        // DELETE may return empty body
+        if (response.status === 204 || response.headers.get("content-length") === "0") {
+          return { data: [] };
+        }
+        return (await response.json()) as JsonApiResponse;
+      }
+
+      let attemptError: Error;
+      let retryAfterMs: number | null = null;
+      let isNetworkOrTimeout = false;
+
+      if (response) {
+        const errorText = await response.text().catch(() => "");
+        attemptError = new Error(formatApiError(response.status, response.statusText, method, path, errorText));
       } else {
-        networkError = err instanceof Error ? err : new Error(String(err));
+        attemptError = networkError!;
+        isNetworkOrTimeout = true;
       }
-    }
 
-    if (response && response.ok) {
-      // DELETE may return empty body
-      if (response.status === 204 || response.headers.get("content-length") === "0") {
-        return { data: [] };
+      const hasMoreAttempts = attempt < totalAttempts - 1;
+      const retryable = isRetryable(method, response?.status, isNetworkOrTimeout);
+
+      if (!hasMoreAttempts || !retryable) {
+        throw attemptError;
       }
-      return (await response.json()) as JsonApiResponse;
+
+      // Only inspect Retry-After when we've actually decided to retry — keeps
+      // the fast path off the headers object and matches existing tests that
+      // build minimal Response stubs.
+      if (response) {
+        retryAfterMs = parseRetryAfter(response.headers?.get("retry-after") ?? null);
+      }
+
+      const backoff =
+        retryAfterMs !== null
+          ? Math.min(retry.maxDelayMs, retryAfterMs)
+          : computeBackoffMs(attempt, retry.baseDelayMs, retry.maxDelayMs);
+      await sleep(backoff);
+      lastError = attemptError;
     }
 
-    let attemptError: Error;
-    let retryAfterMs: number | null = null;
-    let isNetworkOrTimeout = false;
-
-    if (response) {
-      const errorText = await response.text().catch(() => "");
-      attemptError = new Error(formatApiError(response.status, response.statusText, method, path, errorText));
-    } else {
-      attemptError = networkError!;
-      isNetworkOrTimeout = true;
-    }
-
-    const hasMoreAttempts = attempt < totalAttempts - 1;
-    const retryable = isRetryable(method, response?.status, isNetworkOrTimeout);
-
-    if (!hasMoreAttempts || !retryable) {
-      throw attemptError;
-    }
-
-    // Only inspect Retry-After when we've actually decided to retry — keeps
-    // the fast path off the headers object and matches existing tests that
-    // build minimal Response stubs.
-    if (response) {
-      retryAfterMs = parseRetryAfter(response.headers?.get("retry-after") ?? null);
-    }
-
-    const backoff =
-      retryAfterMs !== null
-        ? Math.min(retry.maxDelayMs, retryAfterMs)
-        : computeBackoffMs(attempt, retry.baseDelayMs, retry.maxDelayMs);
-    await sleep(backoff);
-    lastError = attemptError;
+    // Defensive — the loop always returns or throws. If somehow exhausted:
+    throw lastError ?? new Error("BoondManager API request exhausted retries with no recorded error.");
+  } finally {
+    release?.();
   }
-
-  // Defensive — the loop always returns or throws. If somehow exhausted:
-  throw lastError ?? new Error("BoondManager API request exhausted retries with no recorded error.");
 }
 
 export async function apiRequestBinary(
@@ -576,25 +620,34 @@ export async function apiRequestBinary(
 
   const timeoutMs = resolveTimeoutMs();
   const limiter = getRateLimiter();
-  if (limiter) await limiter.acquire();
 
-  const authHeader = await auth();
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    headers: { [authHeader.name]: authHeader.value },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  // Hold a concurrency slot for the whole binary fetch, same as apiRequest.
+  const semaphore = getConcurrencyLimiter();
+  const release = semaphore ? await semaphore.acquire() : null;
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => "");
-    throw new Error(formatApiError(response.status, response.statusText, "GET", path, errorText));
+  try {
+    if (limiter) await limiter.acquire();
+
+    const authHeader = await auth();
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: { [authHeader.name]: authHeader.value },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(formatApiError(response.status, response.statusText, "GET", path, errorText));
+    }
+
+    const mimeType = response.headers.get("content-type") ?? "application/octet-stream";
+    const contentDisposition = response.headers.get("content-disposition") ?? "";
+    const filename = contentDisposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)["']?/i)?.[1];
+    const arrayBuffer = await response.arrayBuffer();
+    return { buffer: Buffer.from(arrayBuffer), mimeType, filename };
+  } finally {
+    release?.();
   }
-
-  const mimeType = response.headers.get("content-type") ?? "application/octet-stream";
-  const contentDisposition = response.headers.get("content-disposition") ?? "";
-  const filename = contentDisposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)["']?/i)?.[1];
-  const arrayBuffer = await response.arrayBuffer();
-  return { buffer: Buffer.from(arrayBuffer), mimeType, filename };
 }
 
 export function buildSearchQuery(params: SearchParams): Record<string, QueryValue> {

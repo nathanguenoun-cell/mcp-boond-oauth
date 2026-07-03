@@ -16,6 +16,8 @@ import {
   computeBackoffMs,
   resolveRateLimitConfig,
   resetRateLimiterForTests,
+  resolveMaxConcurrency,
+  resetConcurrencyLimiterForTests,
   initClientWithAuth,
   resetClientForTests,
   oauthContextAuth,
@@ -1077,6 +1079,113 @@ describe("apiRequest rate limiting", () => {
     const after = vi.mocked(fetchMock).mock.calls.length;
 
     expect(after - before).toBe(5);
+  });
+});
+
+/** Drain pending microtasks so queued acquires can resume before assertions. */
+async function flushMicrotasks(rounds = 20) {
+  for (let i = 0; i < rounds; i++) await Promise.resolve();
+}
+
+describe("resolveMaxConcurrency", () => {
+  afterEach(() => {
+    delete process.env.BOOND_HTTP_MAX_CONCURRENCY;
+  });
+
+  it("defaults to 6 when unset", () => {
+    delete process.env.BOOND_HTTP_MAX_CONCURRENCY;
+    expect(resolveMaxConcurrency()).toBe(6);
+  });
+
+  it("returns null (disabled) for 0", () => {
+    process.env.BOOND_HTTP_MAX_CONCURRENCY = "0";
+    expect(resolveMaxConcurrency()).toBeNull();
+  });
+
+  it("returns null for negative or non-numeric values", () => {
+    process.env.BOOND_HTTP_MAX_CONCURRENCY = "-2";
+    expect(resolveMaxConcurrency()).toBeNull();
+    process.env.BOOND_HTTP_MAX_CONCURRENCY = "abc";
+    expect(resolveMaxConcurrency()).toBeNull();
+  });
+
+  it("parses a positive integer", () => {
+    process.env.BOOND_HTTP_MAX_CONCURRENCY = "3";
+    expect(resolveMaxConcurrency()).toBe(3);
+  });
+});
+
+describe("apiRequest concurrency limiting", () => {
+  const okResponse = () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers({ "content-length": "10" }),
+    json: () => Promise.resolve({ data: [] }),
+  });
+
+  beforeEach(() => {
+    process.env.BOOND_API_TOKEN = "test-token";
+    process.env.BOOND_HTTP_MAX_RETRIES = "0";
+    // Disable the token bucket so we isolate the concurrency semaphore.
+    process.env.BOOND_HTTP_RATE_LIMIT_RPS = "0";
+    resetRateLimiterForTests();
+    resetConcurrencyLimiterForTests();
+    initClient();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.BOOND_API_TOKEN;
+    delete process.env.BOOND_HTTP_MAX_RETRIES;
+    delete process.env.BOOND_HTTP_RATE_LIMIT_RPS;
+    delete process.env.BOOND_HTTP_MAX_CONCURRENCY;
+    resetRateLimiterForTests();
+    resetConcurrencyLimiterForTests();
+  });
+
+  it("caps in-flight requests: with cap=1 the 2nd waits for the 1st", async () => {
+    process.env.BOOND_HTTP_MAX_CONCURRENCY = "1";
+    resetConcurrencyLimiterForTests();
+
+    const resolvers: Array<(v: unknown) => void> = [];
+    const fetchMock = vi.fn(() => new Promise((resolve) => resolvers.push(resolve)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const p1 = apiRequest("/candidates");
+    const p2 = apiRequest("/candidates");
+
+    await flushMicrotasks();
+    // Only the first request may hold the single slot → one fetch in flight.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Finish the first request → its slot frees → the second proceeds.
+    resolvers[0](okResponse());
+    await p1;
+    await flushMicrotasks();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    resolvers[1](okResponse());
+    await p2;
+  });
+
+  it("does not cap when disabled (concurrency=0)", async () => {
+    process.env.BOOND_HTTP_MAX_CONCURRENCY = "0";
+    resetConcurrencyLimiterForTests();
+
+    const resolvers: Array<(v: unknown) => void> = [];
+    const fetchMock = vi.fn(() => new Promise((resolve) => resolvers.push(resolve)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const p1 = apiRequest("/candidates");
+    const p2 = apiRequest("/candidates");
+    const p3 = apiRequest("/candidates");
+
+    await flushMicrotasks();
+    // No cap → all three fire immediately.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    resolvers.forEach((r) => r(okResponse()));
+    await Promise.all([p1, p2, p3]);
   });
 });
 

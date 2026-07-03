@@ -423,6 +423,14 @@ Pour eviter qu'une boucle d'outils emballee n'inonde l'API (et n'enchaine les `4
 | `BOOND_HTTP_RATE_LIMIT_RPS` | `10` | Debit soutenu (requetes/seconde). `0` desactive completement. |
 | `BOOND_HTTP_RATE_LIMIT_BURST` | `20` | Capacite du bucket = taille maximale de rafale immediate. |
 
+### Limitation de concurrence (concurrency cap)
+
+Le token bucket limite le **debit** (req/s), pas le **nombre de requetes simultanees** : une salve de tool calls en parallele (p. ex. 16 d'un coup) peut passer le bucket instantanement et bombarder l'API en `429`. Un **semaphore** borne donc le nombre d'appels BoondManager **en vol en meme temps** ; les appels en trop attendent une place libre (fenetre glissante, sans temps mort) plutot que de partir tous ensemble. Les retries d'une meme requete conservent leur place.
+
+| Variable | Defaut | Description |
+|----------|--------|-------------|
+| `BOOND_HTTP_MAX_CONCURRENCY` | `6` | Nombre maximal de requetes BoondManager simultanees. `0` desactive le plafond. |
+
 ## Transports
 
 Le serveur supporte deux transports MCP, selectionnables via la variable d'environnement `MCP_TRANSPORT`.

@@ -28,6 +28,13 @@ export const DEFAULT_HTTP_RETRY_MAX_MS = 5_000;
 export const DEFAULT_HTTP_RATE_LIMIT_RPS = 10;
 export const DEFAULT_HTTP_RATE_LIMIT_BURST = 20;
 
+// Client-side concurrency cap: max simultaneous in-flight BoondManager requests.
+// The token bucket above limits *rate* (req/s); this limits *concurrency* — a
+// burst of parallel tool calls (e.g. 16 at once) can otherwise stampede the API
+// into 429s and overwhelm the process. Override via BOOND_HTTP_MAX_CONCURRENCY.
+// Set to 0 to disable the cap.
+export const DEFAULT_HTTP_MAX_CONCURRENCY = 6;
+
 // API paths
 export const API_PATHS = {
   candidates: "/candidates",
@@ -78,11 +85,40 @@ export const API_PATHS = {
 // Tab names available on entities (matching actual API endpoints)
 export const ENTITY_TABS = {
   candidates: ["information", "technical-data", "administrative", "actions", "positionings"] as const,
-  resources: ["information", "technical-data", "administrative", "advantages", "actions", "positionings", "projects", "times-reports", "expenses-reports", "absences-reports"] as const,
+  resources: [
+    "information",
+    "technical-data",
+    "administrative",
+    "advantages",
+    "actions",
+    "positionings",
+    "projects",
+    "times-reports",
+    "expenses-reports",
+    "absences-reports",
+  ] as const,
   contacts: ["information", "actions", "opportunities", "projects", "orders", "invoices"] as const,
-  companies: ["information", "contacts", "actions", "opportunities", "projects", "orders", "invoices", "purchases", "provider-invoices"] as const,
+  companies: [
+    "information",
+    "contacts",
+    "actions",
+    "opportunities",
+    "projects",
+    "orders",
+    "invoices",
+    "purchases",
+    "provider-invoices",
+  ] as const,
   opportunities: ["information", "actions", "positionings", "projects", "simulation"] as const,
-  projects: ["information", "actions", "simulation", "deliveries-groupments", "orders", "purchases", "productivity"] as const,
+  projects: [
+    "information",
+    "actions",
+    "simulation",
+    "deliveries-groupments",
+    "orders",
+    "purchases",
+    "productivity",
+  ] as const,
   invoices: ["information", "actions", "billable-items"] as const,
   orders: ["information", "actions", "invoices"] as const,
 } as const;
