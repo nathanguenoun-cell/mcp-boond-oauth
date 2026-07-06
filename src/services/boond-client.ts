@@ -14,6 +14,15 @@ import type { BoondAuthProvider, BoondConfig, JsonApiResponse, SearchParams } fr
 import { TokenBucket } from "./rate-limiter.js";
 import { Semaphore } from "./concurrency-limiter.js";
 import { oauthContext } from "./oauth.js";
+import { logger } from "./logger.js";
+
+/**
+ * Dedicated logger for the BoondManager HTTP client. Surfaces the two failure
+ * modes that were previously invisible in production: rate-limit / server
+ * errors (warn) and back-pressure from the concurrency cap or token bucket
+ * (debug). Lets us tell "the cap engaged" from "the cap did nothing" in logs.
+ */
+const httpLogger = logger.child({ component: "boond-http" });
 
 let config: BoondConfig | null = null;
 
@@ -499,6 +508,7 @@ export async function apiRequest(
   const serializedBody = buildBody();
 
   let lastError: Error | undefined;
+  const endpoint = `${method} ${path}`;
 
   const limiter = getRateLimiter();
 
@@ -506,6 +516,15 @@ export async function apiRequest(
   // this request share one slot), so a wide parallel salvo is capped at N calls
   // in flight rather than stampeding the API. Released in the finally below.
   const semaphore = getConcurrencyLimiter();
+  // Observability: if all slots are taken, this call is about to queue. Seeing
+  // these lines under a burst proves the cap is actually engaging; never seeing
+  // them means the calls aren't concurrent (cap is a no-op for that workload).
+  if (semaphore && semaphore.inFlight() >= semaphore.capacity) {
+    httpLogger.debug(
+      { endpoint, inFlight: semaphore.inFlight(), waiting: semaphore.waiting(), capacity: semaphore.capacity },
+      "Concurrency cap reached; waiting for a slot"
+    );
+  }
   const release = semaphore ? await semaphore.acquire() : null;
 
   try {
@@ -513,6 +532,9 @@ export async function apiRequest(
       // Acquire a token before each attempt so retries also count toward the
       // rate budget — this is what actually protects us from feedback loops
       // (transient 5xx → retry → transient 5xx → …) saturating the API.
+      if (limiter && limiter.peek() < 1) {
+        httpLogger.debug({ endpoint }, "Rate limit reached; throttling before request");
+      }
       if (limiter) await limiter.acquire();
 
       // Resolve the auth header per-attempt so OAuth2 refreshes are picked
@@ -580,6 +602,12 @@ export async function apiRequest(
       const retryable = isRetryable(method, response?.status, isNetworkOrTimeout);
 
       if (!hasMoreAttempts || !retryable) {
+        // Terminal failure — surface it so the 429/5xx storm is visible in prod
+        // logs (endpoint + status + how many attempts were spent).
+        httpLogger.warn(
+          { endpoint, status: response?.status, attempts: attempt + 1, retryable },
+          "BoondManager request failed; giving up"
+        );
         throw attemptError;
       }
 
@@ -594,6 +622,10 @@ export async function apiRequest(
         retryAfterMs !== null
           ? Math.min(retry.maxDelayMs, retryAfterMs)
           : computeBackoffMs(attempt, retry.baseDelayMs, retry.maxDelayMs);
+      httpLogger.warn(
+        { endpoint, status: response?.status, attempt: attempt + 1, backoffMs: backoff, retryAfterMs },
+        "BoondManager request failed; retrying"
+      );
       await sleep(backoff);
       lastError = attemptError;
     }
@@ -619,10 +651,17 @@ export async function apiRequestBinary(
   }
 
   const timeoutMs = resolveTimeoutMs();
+  const endpoint = `GET ${path}`;
   const limiter = getRateLimiter();
 
   // Hold a concurrency slot for the whole binary fetch, same as apiRequest.
   const semaphore = getConcurrencyLimiter();
+  if (semaphore && semaphore.inFlight() >= semaphore.capacity) {
+    httpLogger.debug(
+      { endpoint, inFlight: semaphore.inFlight(), waiting: semaphore.waiting(), capacity: semaphore.capacity },
+      "Concurrency cap reached; waiting for a slot"
+    );
+  }
   const release = semaphore ? await semaphore.acquire() : null;
 
   try {
@@ -637,6 +676,7 @@ export async function apiRequestBinary(
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
+      httpLogger.warn({ endpoint, status: response.status }, "BoondManager binary request failed");
       throw new Error(formatApiError(response.status, response.statusText, "GET", path, errorText));
     }
 

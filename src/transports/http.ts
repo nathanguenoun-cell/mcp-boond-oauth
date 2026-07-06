@@ -582,6 +582,11 @@ export async function startHttpTransport(
 
       // Check method before auth so a GET without a token gets 405, not 401.
       if (req.method !== "POST") {
+        // Stateless mode has no GET/SSE notification stream nor DELETE session
+        // teardown, so MCP clients (Dust's undici sends `GET /mcp`) get a 405.
+        // Expected and benign — logged at debug so it's traceable when chasing
+        // connection issues without spamming default-level logs.
+        reqLogger.debug("Non-POST request to MCP endpoint; returning 405 (stateless: no GET/SSE stream)");
         writeJsonRpcError(res, 405, "Only POST is supported");
         return;
       }
