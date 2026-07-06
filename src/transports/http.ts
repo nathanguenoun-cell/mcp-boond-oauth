@@ -1,5 +1,7 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { logger, generateCorrelationId } from "../services/logger.js";
 import { buildProtectedResourceMetadata, extractBearerToken, oauthContext } from "../services/oauth.js";
@@ -45,9 +47,9 @@ export interface HttpTransportOptions {
 export interface HttpServerHandle {
   close: () => Promise<void>;
   address: { host: string; port: number; path: string };
-  /** Always 0 — stateful sessions are not used in this transport. */
+  /** Live session count (always 0 in stateless mode). */
   sessionCount: () => number;
-  /** No-op — kept for interface compatibility. */
+  /** Force an idle-session sweep now; returns how many were closed. */
   sweepIdleSessions: () => Promise<number>;
 }
 
@@ -119,7 +121,11 @@ export function resolveHttpOptions(): HttpTransportOptions {
     throw new Error(`Invalid MCP_HTTP_PORT: ${portRaw}`);
   }
 
-  const stateless = (readEnv("MCP_HTTP_STATEFUL") ?? "false").toLowerCase() !== "true";
+  // Stateful by default: single-instance deployments (e.g. Railway + Dust) need
+  // the GET/SSE notification stream and one reused McpServer per session. Set
+  // MCP_HTTP_STATEFUL=false only for horizontally-scaled gateways without
+  // session affinity, where a stateless server-per-request is the right model.
+  const stateless = (readEnv("MCP_HTTP_STATEFUL") ?? "true").toLowerCase() === "false";
   const enableJsonResponse = (readEnv("MCP_HTTP_JSON_RESPONSE") ?? "false").toLowerCase() === "true";
 
   return {
@@ -270,6 +276,92 @@ export async function startHttpTransport(
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Validate the MCP-client Bearer token and resolve the (transparently
+   * refreshed) BoondManager token behind it. Writes the 401 challenge and
+   * returns null on failure. Shared by the stateless and stateful paths and,
+   * in stateful mode, run on every request (POST/GET/DELETE) so a session can
+   * never outlive token revocation.
+   */
+  async function authenticateRequest(
+    req: IncomingMessage,
+    res: ServerResponse
+  ): Promise<{ boondToken: string; credId: string } | null> {
+    const ourToken = extractBearerToken(req.headers["authorization"]);
+    if (!ourToken) {
+      writeOAuthError(res, 401, wwwAuthenticate, "Missing Bearer token. Complete the OAuth flow first.");
+      return null;
+    }
+    const tokenData = getAccessToken(ourToken);
+    if (!tokenData) {
+      writeOAuthError(res, 401, wwwAuthenticate, "Invalid or expired Bearer token.");
+      return null;
+    }
+    // Keep the BoondManager session alive: refresh the access token if it's
+    // at/near expiry; force a clean re-auth if it's expired and unrefreshable.
+    let boondToken = tokenData.boondToken;
+    const needsRefresh = tokenData.boondExpiresAt > 0 && tokenData.boondExpiresAt - Date.now() <= BOOND_REFRESH_SKEW_MS;
+    if (needsRefresh) {
+      const refreshed = await refreshBoondCredentials(tokenData.credId, tokenData.boondRefreshToken);
+      if (refreshed) {
+        boondToken = getCredentials(tokenData.credId)?.boondToken ?? boondToken;
+      } else if (tokenData.boondExpiresAt <= Date.now()) {
+        revokeCredentials(tokenData.credId);
+        writeOAuthError(
+          res,
+          401,
+          wwwAuthenticate,
+          "BoondManager session expired and could not be refreshed. Re-authenticate."
+        );
+        return null;
+      }
+    }
+    return { boondToken, credId: tokenData.credId };
+  }
+
+  // ── Stateful session store ────────────────────────────────────────────────
+  // Only used when options.stateless === false. Each session keeps one long-
+  // lived transport + McpServer (reused across the client's POST/GET/DELETE)
+  // instead of the stateless path's server-per-request. Bound to the credId so
+  // a leaked session id can't be ridden by a different identity.
+  interface McpSession {
+    transport: StreamableHTTPServerTransport;
+    server: McpServer;
+    lastActivityAt: number;
+    credId: string;
+  }
+  const sessions = new Map<string, McpSession>();
+  const sessionTtlMs = options.sessionTtlMs ?? 30 * 60_000;
+
+  function closeSession(sessionId: string): void {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    sessions.delete(sessionId);
+    void session.transport.close();
+    void session.server.close();
+  }
+
+  function sweepSessions(): number {
+    const now = Date.now();
+    let closed = 0;
+    for (const [sid, session] of sessions) {
+      if (now - session.lastActivityAt > sessionTtlMs) {
+        closeSession(sid);
+        closed += 1;
+      }
+    }
+    if (closed > 0) logger.debug({ closed, remaining: sessions.size }, "Swept idle MCP sessions");
+    return closed;
+  }
+
+  // Periodically evict idle sessions so a client that vanishes without a DELETE
+  // can't leak a transport + McpServer forever. unref() so it never blocks exit.
+  let sweepTimer: ReturnType<typeof setInterval> | undefined;
+  if (!options.stateless) {
+    sweepTimer = setInterval(sweepSessions, options.sessionSweepIntervalMs ?? 5 * 60_000);
+    sweepTimer.unref();
   }
 
   const httpServer = createServer(async (req, res) => {
@@ -580,66 +672,102 @@ export async function startHttpTransport(
         return;
       }
 
-      // Check method before auth so a GET without a token gets 405, not 401.
-      if (req.method !== "POST") {
-        // Stateless mode has no GET/SSE notification stream nor DELETE session
-        // teardown, so MCP clients (Dust's undici sends `GET /mcp`) get a 405.
-        // Expected and benign — logged at debug so it's traceable when chasing
-        // connection issues without spamming default-level logs.
-        reqLogger.debug("Non-POST request to MCP endpoint; returning 405 (stateless: no GET/SSE stream)");
-        writeJsonRpcError(res, 405, "Only POST is supported");
+      // ── Stateless mode (default): POST-only, fresh transport per request ──
+      if (options.stateless) {
+        if (req.method !== "POST") {
+          // No GET/SSE notification stream nor DELETE teardown in stateless mode,
+          // so MCP clients (Dust's undici sends `GET /mcp`) get a 405. Expected;
+          // logged at debug so it's traceable without spamming default logs.
+          reqLogger.debug("Non-POST request to MCP endpoint; returning 405 (stateless: no GET/SSE stream)");
+          writeJsonRpcError(res, 405, "Only POST is supported");
+          return;
+        }
+        const auth = await authenticateRequest(req, res);
+        if (!auth) return;
+        await oauthContext.run({ accessToken: auth.boondToken }, async () => {
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: undefined,
+            enableJsonResponse: options.enableJsonResponse,
+          });
+          const server = createServerFactory();
+          res.on("close", () => {
+            void transport.close();
+            void server.close();
+          });
+          await server.connect(transport);
+          await transport.handleRequest(req, res);
+        });
         return;
       }
 
-      const ourToken = extractBearerToken(req.headers["authorization"]);
-      if (!ourToken) {
-        writeOAuthError(res, 401, wwwAuthenticate, "Missing Bearer token. Complete the OAuth flow first.");
+      // ── Stateful mode: session-routed GET(SSE) / POST / DELETE ───────────
+      // Auth runs on every request so a session can't outlive token revocation.
+      const auth = await authenticateRequest(req, res);
+      if (!auth) return;
+
+      const sessionHeader = req.headers["mcp-session-id"];
+      const sid = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
+      const session = sid ? sessions.get(sid) : undefined;
+
+      // Anti-hijack: a known session id presented with a different credential
+      // set must not ride the existing session.
+      if (session && session.credId !== auth.credId) {
+        writeJsonRpcError(res, 403, "Session does not belong to this identity");
         return;
       }
 
-      const tokenData = getAccessToken(ourToken);
-      if (!tokenData) {
-        writeOAuthError(res, 401, wwwAuthenticate, "Invalid or expired Bearer token.");
-        return;
-      }
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
 
-      // Keep the BoondManager session alive: if its access token is at/near
-      // expiry, refresh it transparently before serving the request. If the
-      // token is already expired and the refresh fails, force a clean re-auth
-      // (401 + challenge) instead of letting every tool call fail silently.
-      let boondToken = tokenData.boondToken;
-      const needsRefresh =
-        tokenData.boondExpiresAt > 0 && tokenData.boondExpiresAt - Date.now() <= BOOND_REFRESH_SKEW_MS;
-      if (needsRefresh) {
-        const refreshed = await refreshBoondCredentials(tokenData.credId, tokenData.boondRefreshToken);
-        if (refreshed) {
-          boondToken = getCredentials(tokenData.credId)?.boondToken ?? boondToken;
-        } else if (tokenData.boondExpiresAt <= Date.now()) {
-          revokeCredentials(tokenData.credId);
-          writeOAuthError(
-            res,
-            401,
-            wwwAuthenticate,
-            "BoondManager session expired and could not be refreshed. Re-authenticate."
+        if (session) {
+          session.lastActivityAt = Date.now();
+          await oauthContext.run({ accessToken: auth.boondToken }, () =>
+            session.transport.handleRequest(req, res, body)
           );
           return;
         }
+
+        if (sid) {
+          writeJsonRpcError(res, 404, "Unknown or expired session. Re-initialize.");
+          return;
+        }
+        if (!isInitializeRequest(body)) {
+          writeJsonRpcError(res, 400, "Missing Mcp-Session-Id (send an initialize request first).");
+          return;
+        }
+
+        // New session: build a stateful transport + server, register on init.
+        const server = createServerFactory();
+        let transport: StreamableHTTPServerTransport;
+        // eslint-disable-next-line prefer-const
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          enableJsonResponse: options.enableJsonResponse,
+          onsessioninitialized: (newSid) => {
+            sessions.set(newSid, { transport, server, lastActivityAt: Date.now(), credId: auth.credId });
+            reqLogger.debug({ sessionId: newSid, sessions: sessions.size }, "MCP session initialized");
+          },
+          onsessionclosed: (closedSid) => closeSession(closedSid),
+        });
+        transport.onclose = () => {
+          if (transport.sessionId) sessions.delete(transport.sessionId);
+        };
+        await server.connect(transport);
+        await oauthContext.run({ accessToken: auth.boondToken }, () => transport.handleRequest(req, res, body));
+        return;
       }
 
-      // Map our token → BoondManager token and inject into the per-request context.
-      await oauthContext.run({ accessToken: boondToken }, async () => {
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: undefined,
-          enableJsonResponse: options.enableJsonResponse,
-        });
-        const server = createServerFactory();
-        res.on("close", () => {
-          void transport.close();
-          void server.close();
-        });
-        await server.connect(transport);
-        await transport.handleRequest(req, res);
-      });
+      if (req.method === "GET" || req.method === "DELETE") {
+        if (!session) {
+          writeJsonRpcError(res, sid ? 404 : 400, sid ? "Unknown or expired session." : "Missing Mcp-Session-Id.");
+          return;
+        }
+        session.lastActivityAt = Date.now();
+        await oauthContext.run({ accessToken: auth.boondToken }, () => session.transport.handleRequest(req, res));
+        return;
+      }
+
+      writeJsonRpcError(res, 405, "Method not allowed");
     } catch (error) {
       reqLogger.error({ err: error }, "HTTP transport error");
       if (!res.headersSent) {
@@ -660,9 +788,11 @@ export async function startHttpTransport(
 
   return {
     address: { host: options.host, port: options.port, path: options.path },
-    sessionCount: () => 0,
-    sweepIdleSessions: () => Promise.resolve(0),
+    sessionCount: () => sessions.size,
+    sweepIdleSessions: () => Promise.resolve(sweepSessions()),
     close: async () => {
+      if (sweepTimer) clearInterval(sweepTimer);
+      for (const sid of [...sessions.keys()]) closeSession(sid);
       await new Promise<void>((resolve, reject) => {
         httpServer.close((err) => (err ? reject(err) : resolve()));
       });

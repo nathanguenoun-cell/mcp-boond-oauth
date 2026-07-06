@@ -313,14 +313,16 @@ HTTP env vars (see `src/transports/http.ts::resolveHttpOptions`):
 | `MCP_HTTP_HOST` | `127.0.0.1` | Listen interface (Docker image overrides to `0.0.0.0`) |
 | `MCP_HTTP_PORT` | `3000` | TCP port |
 | `MCP_HTTP_PATH` | `/mcp` | Endpoint path |
-| `MCP_HTTP_STATEFUL` | `false` | `true` to enable session mode (`Mcp-Session-Id`) |
+| `MCP_HTTP_STATEFUL` | `true` | Session mode (`Mcp-Session-Id`). **Stateful by default** — only this mode serves the `GET /mcp` SSE notification stream; in stateless mode the SDK client (Dust's undici) opens `GET /mcp` and gets a 405 on every attempt, and a new `McpServer` is built per POST. Set to `false` only for horizontally-scaled gateways without session affinity. |
 | `MCP_HTTP_JSON_RESPONSE` | `false` | `true` to return JSON instead of SSE streams |
 | `MCP_HTTP_PUBLIC_URL` | (derived) | Public URL advertised in the OAuth2 discovery metadata. Required behind a reverse proxy. |
 | `MCP_HTTP_SESSION_TTL_MS` | `1800000` (30 min) | Stateful only: idle window before a session is closed |
 | `MCP_HTTP_SESSION_SWEEP_INTERVAL_MS` | `300000` (5 min) | Stateful only: how often to scan for idle sessions |
 | `MCP_HTTP_ALLOWED_HOSTS` | (auto) | Comma-separated allow-list of `Host` header hostnames for DNS rebinding protection (CVE-2025-66414). Default = `localhost,127.0.0.1,[::1]` when bound to a loopback interface, otherwise validation is disabled. Set to `*` to opt out explicitly when fronting the server with a reverse proxy that already validates hosts. |
 
-Stateless mode spins up a fresh `McpServer`+`StreamableHTTPServerTransport` per POST. Stateful mode keeps a `sessionId → { transport, server, lastActivityAt }` map; a periodic sweep closes idle sessions (transport + McpServer) so a buggy client that disconnects without `onsessionclosed` cannot leak resources. The sweep timer is `unref()`'d so it never blocks shutdown. The handle exposes `sessionCount()` and `sweepIdleSessions()` for observability/tests.
+**Stateless mode** (`MCP_HTTP_STATEFUL=false`) spins up a fresh `McpServer`+`StreamableHTTPServerTransport` per POST and answers **only POST** — `GET`/`DELETE` on the MCP endpoint get a 405 (no SSE stream, no session teardown). Reserve it for horizontally-scaled gateways without session affinity.
+
+**Stateful mode** (default) keeps a `sessionId → { transport, server, lastActivityAt, credId }` map. The `initialize` POST creates the session (SDK `sessionIdGenerator` → `Mcp-Session-Id` header, stored via `onsessioninitialized`); subsequent `POST`/`GET`(SSE)/`DELETE` carrying that header are routed to the same long-lived transport via `transport.handleRequest`. Every request is re-authenticated (Bearer → transparent Boond refresh via the shared `authenticateRequest` helper) and runs tools with the *current* Boond token through `oauthContext`, so a long session never serves a stale token; the session is bound to its `credId`, and a request presenting the session id with a different credential set is rejected with **403**. A periodic sweep (`unref()`'d timer) closes sessions idle past `MCP_HTTP_SESSION_TTL_MS`; the handle exposes `sessionCount()` and `sweepIdleSessions()`. Rollback is a single env flip back to stateless.
 
 ## Authentication
 

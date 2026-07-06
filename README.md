@@ -470,7 +470,7 @@ npx boondmanager-mcp-server
 | `MCP_HTTP_HOST` | `127.0.0.1` | Interface d'ecoute (`0.0.0.0` pour exposer) |
 | `MCP_HTTP_PORT` | `3000` | Port TCP |
 | `MCP_HTTP_PATH` | `/mcp` | Chemin HTTP de l'endpoint MCP |
-| `MCP_HTTP_STATEFUL` | `false` | `true` pour activer le mode stateful (session `Mcp-Session-Id`) |
+| `MCP_HTTP_STATEFUL` | `true` | Mode stateful (session `Mcp-Session-Id`), **actif par defaut**. Mettre `false` pour du stateless (gateways scalés horizontalement sans affinite de session). |
 | `MCP_HTTP_JSON_RESPONSE` | `false` | `true` pour forcer des reponses JSON (sans SSE) |
 | `MCP_HTTP_PUBLIC_URL` | _(derivee)_ | URL publique annoncee dans la discovery OAuth2 (`resource`) et le challenge `WWW-Authenticate`. Requise derriere un reverse proxy. |
 | `MCP_HTTP_SESSION_TTL_MS` | `1800000` (30 min) | En mode stateful, duree d'inactivite au-dela de laquelle une session est fermee. |
@@ -484,9 +484,9 @@ npx boondmanager-mcp-server
 | `BOOND_OAUTH_AUTHORIZATION_SERVER` | `https://ui.boondmanager.com` | Issuer de l'authorization server BoondManager, annonce dans `authorization_servers` |
 | `BOOND_OAUTH_SCOPES` | _(vide)_ | Scopes annonces dans `scopes_supported` (espace ou virgule). Vide = le client negocie directement avec Boond. |
 
-**Stateless (defaut)** : chaque requete HTTP POST est independante, idealement adapte a un gateway qui multiplexe plusieurs serveurs MCP. Aucune session n'est conservee cote serveur.
+**Stateless** (`MCP_HTTP_STATEFUL=false`) : chaque requete HTTP POST est independante, idealement adapte a un gateway qui multiplexe plusieurs serveurs MCP scalés horizontalement. Aucune session n'est conservee cote serveur. Seul le `POST` est accepte : un `GET /mcp` (ouverture du flux SSE) recoit un **405**.
 
-**Stateful** : le serveur genere un `Mcp-Session-Id` a l'initialisation que le client doit renvoyer dans chaque requete suivante. Utile pour les clients MCP natifs qui beneficient du streaming SSE et des notifications serveur.
+**Stateful (defaut)** : le serveur genere un `Mcp-Session-Id` a l'initialisation que le client renvoie dans chaque requete suivante ; il sert alors le flux **GET (SSE)** de notifications et le `DELETE` de fermeture de session, et reutilise un seul `McpServer` par session. Chaque requete reste authentifiee (Bearer + refresh transparent du token Boond) et la session est liee a son identite (`credId`) — une session presentee par une autre identite est rejetee en **403**. Sans ce mode, les clients MCP natifs (Dust/undici) bombardent `GET /mcp` de 405.
 
 #### Exemple : discovery + 401 challenge
 

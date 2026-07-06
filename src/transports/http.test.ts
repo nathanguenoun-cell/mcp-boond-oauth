@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { request as httpRequest } from "node:http";
-import { resolveAllowedHosts, resolveHttpOptions, startHttpTransport, type HttpServerHandle } from "./http.js";
+import {
+  resolveAllowedHosts,
+  resolveHttpOptions,
+  startHttpTransport,
+  type HttpServerHandle,
+  type HttpTransportOptions,
+} from "./http.js";
 import {
   createCredentials,
   getCredentials,
@@ -95,11 +101,16 @@ describe("resolveHttpOptions", () => {
     expect(opts.host).toBe("127.0.0.1");
     expect(opts.port).toBe(3000);
     expect(opts.path).toBe("/mcp");
-    expect(opts.stateless).toBe(true);
+    expect(opts.stateless).toBe(false); // stateful by default
     expect(opts.enableJsonResponse).toBe(false);
     expect(opts.publicUrl).toBeUndefined();
     expect(opts.sessionTtlMs).toBe(30 * 60_000);
     expect(opts.sessionSweepIntervalMs).toBe(5 * 60_000);
+  });
+
+  it("opts into stateless when MCP_HTTP_STATEFUL=false", () => {
+    process.env["MCP_HTTP_STATEFUL"] = "false";
+    expect(resolveHttpOptions().stateless).toBe(true);
   });
 
   it("reads session lifecycle knobs from env", () => {
@@ -661,5 +672,165 @@ describe("startHttpTransport — transparent BoondManager token refresh", () => 
     expect(res.headers.get("www-authenticate") ?? "").toMatch(/^Bearer /);
     // The dead credential set is revoked so the client re-authenticates cleanly.
     expect(getCredentials(credId)).toBeUndefined();
+  });
+});
+
+describe("startHttpTransport — stateful mode", () => {
+  let handle: HttpServerHandle | undefined;
+  let port = 34600;
+
+  beforeEach(() => {
+    seedTokenPairForTesting(TEST_OUR_TOKEN, TEST_BOOND_TOKEN);
+  });
+
+  afterEach(async () => {
+    if (handle) await handle.close();
+    handle = undefined;
+  });
+
+  async function startStateful(overrides: Partial<HttpTransportOptions> = {}): Promise<HttpServerHandle> {
+    handle = await startHttpTransport(createMcpServer, {
+      host: "127.0.0.1",
+      port: port++,
+      path: "/mcp",
+      stateless: false,
+      enableJsonResponse: true,
+      ...overrides,
+    });
+    return handle;
+  }
+
+  function endpoint(): string {
+    return `http://127.0.0.1:${handle!.address.port}/mcp`;
+  }
+
+  async function initSession(token = TEST_OUR_TOKEN): Promise<{ status: number; sessionId: string | null }> {
+    const res = await fetch(endpoint(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${token}`,
+      },
+      body: INITIALIZE_BODY,
+    });
+    await res.text().catch(() => ""); // drain so the socket is released
+    return { status: res.status, sessionId: res.headers.get("mcp-session-id") };
+  }
+
+  it("initialize creates a session and returns Mcp-Session-Id", async () => {
+    await startStateful();
+    const { status, sessionId } = await initSession();
+    expect(status).toBe(200);
+    expect(sessionId).toBeTruthy();
+    expect(handle!.sessionCount()).toBe(1);
+  });
+
+  it("routes a follow-up request to the existing session (202, no re-init)", async () => {
+    await startStateful();
+    const { sessionId } = await initSession();
+    expect(sessionId).toBeTruthy();
+    // The initialized notification must be accepted (202) on the same session.
+    const res = await fetch(endpoint(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${TEST_OUR_TOKEN}`,
+        "Mcp-Session-Id": sessionId!,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+    await res.text().catch(() => "");
+    expect(res.status).toBe(202);
+    expect(handle!.sessionCount()).toBe(1); // reused, not a new session
+  });
+
+  it("serves GET (SSE) for a valid session instead of 405", async () => {
+    await startStateful();
+    const { sessionId } = await initSession();
+    const controller = new AbortController();
+    try {
+      const res = await fetch(endpoint(), {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          Authorization: `Bearer ${TEST_OUR_TOKEN}`,
+          "Mcp-Session-Id": sessionId!,
+        },
+        signal: controller.signal,
+      });
+      expect(res.status).toBe(200); // SSE stream established, NOT 405
+    } finally {
+      controller.abort(); // don't leave the standalone SSE stream open
+    }
+  });
+
+  it("rejects GET without a session id (400)", async () => {
+    await startStateful();
+    const res = await fetch(endpoint(), {
+      method: "GET",
+      headers: { Accept: "text/event-stream", Authorization: `Bearer ${TEST_OUR_TOKEN}` },
+    });
+    await res.text().catch(() => "");
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a request with an unknown session id (404)", async () => {
+    await startStateful();
+    const res = await fetch(endpoint(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${TEST_OUR_TOKEN}`,
+        "Mcp-Session-Id": "does-not-exist",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+    await res.text().catch(() => "");
+    expect(res.status).toBe(404);
+  });
+
+  it("rejects a session id presented by a different identity (403)", async () => {
+    await startStateful();
+    const { sessionId } = await initSession(TEST_OUR_TOKEN);
+    // A second, distinct credential set (different credId).
+    seedTokenPairForTesting("other-our-token", "other-boond-token");
+    const res = await fetch(endpoint(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: "Bearer other-our-token",
+        "Mcp-Session-Id": sessionId!,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+    await res.text().catch(() => "");
+    expect(res.status).toBe(403);
+    expect(handle!.sessionCount()).toBe(1); // the legit session is untouched
+  });
+
+  it("closes the session on DELETE", async () => {
+    await startStateful();
+    const { sessionId } = await initSession();
+    expect(handle!.sessionCount()).toBe(1);
+    const res = await fetch(endpoint(), {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${TEST_OUR_TOKEN}`, "Mcp-Session-Id": sessionId! },
+    });
+    await res.text().catch(() => "");
+    expect(handle!.sessionCount()).toBe(0);
+  });
+
+  it("sweepIdleSessions evicts sessions past their TTL", async () => {
+    await startStateful({ sessionTtlMs: 1 });
+    await initSession();
+    expect(handle!.sessionCount()).toBe(1);
+    await new Promise((r) => setTimeout(r, 20));
+    const closed = await handle!.sweepIdleSessions();
+    expect(closed).toBe(1);
+    expect(handle!.sessionCount()).toBe(0);
   });
 });
