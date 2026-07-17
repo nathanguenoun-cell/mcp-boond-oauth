@@ -1041,12 +1041,15 @@ export const PositioningCreateSchema = z
   })
   .strict();
 
+// No `projectId`: the /positionings RAML documents no PRJ keywords prefix, so
+// filtering by project is not supported by the API. Keeping the field would
+// silently return the unfiltered baseline; omitting it from this .strict()
+// schema surfaces a clear validation error instead.
 export const PositioningSearchSchema = z
   .object({
     keywords: z.string().optional().describe("Mots-clés de recherche"),
     candidateId: z.string().optional().describe("Filtrer par ID candidat"),
     resourceId: z.string().optional().describe("Filtrer par ID ressource"),
-    projectId: z.string().optional().describe("Filtrer par ID projet"),
     opportunityId: z.string().optional().describe("Filtrer par ID opportunité"),
     page: z.number().int().min(1).max(MAX_SEARCH_PAGE).default(1).describe(`Numéro de page (max: ${MAX_SEARCH_PAGE})`),
     pageSize: z.number().int().min(1).max(MAX_PAGE_SIZE).default(DEFAULT_PAGE_SIZE).describe("Résultats par page"),

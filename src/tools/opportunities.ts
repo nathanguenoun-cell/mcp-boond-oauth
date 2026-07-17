@@ -1,5 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { OpportunityCreateSchema, OpportunityUpdateSchema, OpportunitySearchSchema, IdSchema } from "../schemas/index.js";
+import {
+  OpportunityCreateSchema,
+  OpportunityUpdateSchema,
+  OpportunitySearchSchema,
+  IdSchema,
+} from "../schemas/index.js";
 import type { IdInput } from "../schemas/index.js";
 import {
   registerSearchTool,
@@ -9,7 +14,7 @@ import {
   registerDeleteTool,
   buildJsonApiBody,
 } from "./crud-factory.js";
-import { apiRequest, formatDetailResponse } from "../services/boond-client.js";
+import { apiRequest, formatDetailResponse, formatListResponse } from "../services/boond-client.js";
 
 const OPTS = {
   entityName: "opportunité",
@@ -30,6 +35,12 @@ interface TabDefinition {
   tab: string;
   title: string;
   description: string;
+  /**
+   * Set on tabs whose endpoint returns a JSON:API collection: formatDetailResponse
+   * keeps only data[0] and would silently drop every other item. The value is the
+   * entity label passed to formatListResponse.
+   */
+  collectionLabel?: string;
 }
 
 const OPPORTUNITY_TABS: TabDefinition[] = [
@@ -58,6 +69,7 @@ Returns: Liste des actions liées à l'opportunité.`,
   {
     name: "positionings",
     tab: "positionings",
+    collectionLabel: "positionnement",
     title: "Positionnements d'une opportunité",
     description: `Récupère les positionnements (candidats/ressources proposés) sur une opportunité.
 
@@ -145,7 +157,9 @@ export function registerOpportunityTools(server: McpServer): void {
       },
       async (params: IdInput) => {
         const response = await apiRequest(`/opportunities/${params.id}/${tab.tab}`);
-        const text = formatDetailResponse(response);
+        const text = tab.collectionLabel
+          ? formatListResponse(response, tab.collectionLabel)
+          : formatDetailResponse(response);
         return {
           content: [{ type: "text" as const, text }],
         };

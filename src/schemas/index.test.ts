@@ -567,14 +567,18 @@ describe("PositioningSearchSchema", () => {
     expect(result.page).toBe(1);
   });
 
-  it("should accept all filters", () => {
+  it("should accept all supported filters", () => {
     const result = PositioningSearchSchema.safeParse({
       candidateId: "1",
       resourceId: "2",
-      projectId: "3",
       opportunityId: "4",
     });
     expect(result.success).toBe(true);
+  });
+
+  it("should reject projectId, which the /positionings API cannot filter on", () => {
+    const result = PositioningSearchSchema.safeParse({ projectId: "3" });
+    expect(result.success).toBe(false);
   });
 });
 
